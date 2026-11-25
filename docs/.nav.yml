@@ -24,6 +24,7 @@ nav:
     - Configuration:
       - configuration/README.md
       - configuration/constraint_tables.md
+      - configuration/gpu_tuning.md
     - Models:
       - models/supported_models.md
     - Examples:

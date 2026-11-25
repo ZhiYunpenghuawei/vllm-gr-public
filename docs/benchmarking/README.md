@@ -13,6 +13,7 @@ installed vLLM-GR version.
 | Recommendation accuracy | Run the [accuracy benchmark](accuracy.md) with a CUDA constraint table or against a CUDA server. | Use the same [accuracy benchmark](accuracy.md) with an NPU constraint table or against an Ascend server. |
 | HTTP throughput and latency | Run the [HTTP client](throughput.md#online-serving) against a CUDA server. | Run the same client against an [Ascend HTTP server](common.md#online-server-mode). |
 | Offline Beam performance | Measure [dataset throughput](throughput.md#cuda-dataset-throughput) with catalog-constrained generation. | Measure [batch latency and requests/s](throughput.md#ascend-batch-latency) with a fixed prompt and batch size. |
+| Beam inference tuning | Use the [GPU performance tuning guide](../configuration/gpu_tuning.md) to choose search, projection, Top-K, attention, and graph settings for your workload. | See the [Ascend Beam guide](../user_guide/beam_search_npu.md). |
 | Change in performance between two commits | Repeat the [Beam performance workload](../cli/bench/beam_performance.md) on the same device with identical inputs and settings. | Repeat the [Ascend latency example](throughput.md#ascend-batch-latency) on both commits with the same device, model, prompt, Beam settings, and warmup. |
 
 !!! note "Comparing devices"

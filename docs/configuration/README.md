@@ -6,6 +6,9 @@ options at the top level and vLLM-GR options under `gr`. The
 CUDA and Ascend settings. Native engines started without GR configuration use
 the upstream vLLM defaults.
 
+For the performance impact of individual settings and device-specific starting
+points, see the [GPU performance tuning guide](gpu_tuning.md).
+
 GR stores its resolved configuration in `additional_config["vllm_gr"]`.
 Supply settings through `gr=`, `--gr-config`, or the YAML `gr` section.
 EngineArgs resolves the settings on the driver before publishing a JSON-compatible
