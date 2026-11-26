@@ -8,11 +8,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.helpers.cuda_platform import CudaGRPlatform
 from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import BACKEND_PLAN_KEY
-from vllm_gr.platforms.cuda import CUDA_BACKEND
+from vllm_gr.config.resolved_choices import ResolvedChoices
+from vllm_gr.platforms import table
 from vllm_gr.platforms.planning import normalize_backend_request
-from vllm_gr.platforms.services import LegacyPlanningProvider
 from vllm_gr.v1.worker.cuda import runner_installer as runner
 from vllm_gr.v1.worker.runner_lifecycle import (
     NativeRunnerAdapter,
@@ -20,11 +21,15 @@ from vllm_gr.v1.worker.runner_lifecycle import (
     install_runner_lifecycle,
 )
 
+cuda = CudaGRPlatform()
+
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
 
 @pytest.fixture  # type: ignore[misc]
 def workers(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(table, "current_gr_platform", lambda: cuda)
+
     class NativeRunner:
         def execute_model(self) -> str:
             return "executed"
@@ -42,12 +47,12 @@ def workers(monkeypatch: pytest.MonkeyPatch) -> Any:
             discover_worker_runners=lambda native=native: ((native.__name__, native),),
             is_patched=lambda cls, identity=identity: has_runner_lifecycle(cls, identity),
             install=Mock(
-                side_effect=lambda native=native,
-                identity=identity,
-                name=name: install_runner_lifecycle(
-                    native,
-                    identity,
-                    prepare="prepare_inputs",
+                side_effect=lambda native=native, identity=identity, name=name: (
+                    install_runner_lifecycle(
+                        native,
+                        identity,
+                        prepare="prepare_inputs",
+                    )
                 )
             ),
         )
@@ -66,7 +71,7 @@ def workers(monkeypatch: pytest.MonkeyPatch) -> Any:
         runner, "discover_worker_runners", lambda: (("CUDA Worker.init_device", Worker),)
     )
     monkeypatch.setattr(runner, "install_worker_hooks", Mock())
-    hooks = CUDA_BACKEND.get_model_runner_hooks()
+    hooks = cuda.get_model_runner_hooks()
     hooks.install()
     patched = Worker.init_device
     hooks.install()
@@ -77,8 +82,8 @@ def workers(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def admit(config: Any) -> Any:
     GRConfig().write_to_vllm_config(config)
-    plan = CUDA_BACKEND.resolve(normalize_backend_request(config, CUDA_BACKEND))
-    config.additional_config[BACKEND_PLAN_KEY] = plan.to_wire()
+    plan = cuda.resolve(normalize_backend_request(config, cuda))
+    config.additional_config[BACKEND_PLAN_KEY] = ResolvedChoices.from_plan(plan).to_wire()
     return plan
 
 
@@ -88,7 +93,7 @@ def test_each_worker_uses_its_admitted_runner_and_stage(workers: Any) -> None:
         config = SimpleNamespace(additional_config={}, use_v2_model_runner=use_v2)
         plan = admit(config)
         native = Worker(config).init_device()
-        adapter = CUDA_BACKEND.create_model_runner_adapter(plan=plan, native_runner=native)
+        adapter = cuda.create_model_runner_adapter(plan=plan, native_runner=native)
         assert isinstance(adapter, NativeRunnerAdapter)
         assert adapter.implementation_id == plan.choices.to_dict()["runner"]
         assert adapter.execute_model() == "executed"
@@ -123,7 +128,7 @@ def test_watermark_override_selects_v2_with_the_v1_environment(
     plan = admit(config)
     Worker, installers = workers
     native = Worker(config).init_device()
-    adapter = CUDA_BACKEND.create_model_runner_adapter(plan=plan, native_runner=native)
+    adapter = cuda.create_model_runner_adapter(plan=plan, native_runner=native)
     assert isinstance(adapter, NativeRunnerAdapter)
     assert plan.request.native.to_dict()["use_v2_model_runner"] is True
     assert adapter.implementation_id == runner.V2_RUNNER
@@ -150,18 +155,6 @@ def test_mismatch_and_incomplete_install_fail_before_runner_construction(workers
     assert hooks.is_patched(type(native))
 
 
-def test_legacy_provider_can_delegate_to_the_cuda_installer(workers: Any) -> None:
-    Worker, _ = workers
-    config = SimpleNamespace(additional_config={}, use_v2_model_runner=True)
-    GRConfig().write_to_vllm_config(config)
-    provider = LegacyPlanningProvider(CUDA_BACKEND)
-    plan = provider.resolve(normalize_backend_request(config, CUDA_BACKEND))
-    config.additional_config[BACKEND_PLAN_KEY] = plan.to_wire()
-    native = Worker(config).init_device()
-    adapter = provider.create_model_runner_adapter(plan=plan, native_runner=native)
-    assert adapter.implementation_id == runner.V2_RUNNER
-
-
 def test_installer_module_can_move_without_changing_a_plan_or_readiness(
     workers: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -172,7 +165,7 @@ def test_installer_module_can_move_without_changing_a_plan_or_readiness(
     installers[new_path] = installers.pop(runner.V2_RUNNER)
     monkeypatch.setitem(runner._INSTALLER_MODULES, runner.V2_RUNNER, new_path)
     native = Worker(config).init_device()
-    adapter = CUDA_BACKEND.create_model_runner_adapter(plan=plan, native_runner=native)
+    adapter = cuda.create_model_runner_adapter(plan=plan, native_runner=native)
     assert isinstance(adapter, NativeRunnerAdapter)
     assert runner.is_patched(type(native))
     assert adapter.implementation_id == plan.choices.to_dict()["runner"] == runner.V2_RUNNER

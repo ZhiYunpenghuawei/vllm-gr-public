@@ -15,7 +15,11 @@ from unittest import mock
 
 import pytest
 
-from tests.helpers.gr_config import engine_args_from_file, prepared_engine_args
+from tests.helpers.gr_config import (
+    engine_args_from_file,
+    platform_config_service,
+    prepared_engine_args,
+)
 from tests.helpers.paths import REPO_ROOT, TESTS_DIR
 from vllm_gr.config import (
     CONSTRAINT_TABLE_FORMAT,
@@ -28,7 +32,6 @@ from vllm_gr.config import (
     write_canonical_gr_config,
 )
 from vllm_gr.config.parser import GR_CONFIG_KEY, parse_gr_config
-from vllm_gr.platforms.legacy import legacy_config_service
 
 CATALOG_PATH_KEY = "vllm_gr_catalog_path"
 
@@ -133,7 +136,9 @@ def test_default_capture_sizes_preserve_smaller_engine_capacity(
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs, async_scheduling=True),
     )
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
-    monkeypatch.setattr(arg_utils_gr, "engine_config_service", lambda: legacy_config_service(None))
+    monkeypatch.setattr(
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(None)
+    )
     assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
     assert host.scheduler_config.max_num_seqs == max_num_seqs
     assert GRConfig.from_vllm_config(host).deployment.beam_batch_sizes == (1, 2, 4)
@@ -162,7 +167,9 @@ def test_engine_creation_preserves_beam_batch_sizes(
     )
     args = engine_args_from_file(tmp_path, {"gr": {"beam_batch_sizes": [1, 3, 7]}})
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
-    monkeypatch.setattr(arg_utils_gr, "engine_config_service", lambda: legacy_config_service(None))
+    monkeypatch.setattr(
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(None)
+    )
     assert arg_utils_gr.create_engine_config(args) is host
     assert GRConfig.from_vllm_config(host).deployment.beam_batch_sizes == (1, 3, 7)
     GRConfig().write_to_vllm_config(host)
@@ -353,7 +360,9 @@ def test_engine_creation_preserves_flat_graph_batch_size(
     )
     args = engine_args_from_file(tmp_path, {"gr": {"decode_graph_batch_size": batch_size}})
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: config)
-    monkeypatch.setattr(arg_utils_gr, "engine_config_service", lambda: legacy_config_service(None))
+    monkeypatch.setattr(
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(None)
+    )
 
     if not hasattr(config, "scheduler_config"):
         config.scheduler_config = SimpleNamespace(async_scheduling=True)
@@ -380,7 +389,7 @@ def test_canonical_inputs_produce_identical_worker_configuration(
     }
     original = json.dumps(raw, sort_keys=True)
     monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service("cuda")
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service("cuda")
     )
     outputs = []
     for from_file in (False, True):
@@ -426,7 +435,7 @@ def test_engine_creation_writes_enabled_canonical_config(
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=legacy_config_service(None),
+            return_value=platform_config_service(None),
         ),
     ):
         assert create_engine_config(engine_args) is vllm_config
@@ -470,7 +479,9 @@ def test_canonical_input_paths_share_serialization_and_compile_hash(
     offline = VllmConfig(additional_config={"other_plugin": unrelated})
     online = VllmConfig(additional_config={"other_plugin": unrelated})
     # Isolate configuration normalization from accelerator startup policy.
-    monkeypatch.setattr(arg_utils_gr, "engine_config_service", lambda: legacy_config_service(None))
+    monkeypatch.setattr(
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(None)
+    )
     for host, engine_args in (
         (offline, engine_args_from_file(tmp_path, raw)),
         (online, engine_args_from_file(tmp_path, gr_config_to_mapping(expected))),
@@ -578,7 +589,7 @@ def test_benchmark_server_command_uses_canonical_attention_backend(
     )
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *a: config)
     monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service(device)
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(device)
     )
 
     result = arg_utils_gr.create_engine_config(engine_args)
@@ -610,7 +621,7 @@ def test_engine_creation_serializes_cuda_decision_defaults(
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=legacy_config_service("cuda"),
+            return_value=platform_config_service("cuda"),
         ),
     ):
         assert create_engine_config(engine_args) is vllm_config
@@ -775,7 +786,7 @@ def test_native_engine_does_not_inherit_gr_defaults_or_parallelism_limits(
     from vllm_gr.engine import arg_utils_gr
 
     monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service("cuda")
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service("cuda")
     )
 
     def native_config(args: Any, *unused: Any) -> Any:
@@ -849,7 +860,7 @@ def test_npu_sid_stage_vocab_resolves_auto_before_validation(
     from vllm_gr.engine import arg_utils_gr
 
     defaults = arg_utils_gr._beam_worker_decision_default(
-        legacy_config_service("npu"), beam_width_configured=True, worker_decision=None
+        platform_config_service("npu"), beam_width_configured=True, worker_decision=None
     )
     settings = {"sid_stage_vocab": True}
     if worker_decision is not None:

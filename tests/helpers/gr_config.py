@@ -19,6 +19,19 @@ from vllm_gr.config import (
     GRConfig,
 )
 from vllm_gr.config.models import DeploymentOptions
+from vllm_gr.platforms.config import BackendConfigService
+
+
+def platform_config_service(device: str | None) -> BackendConfigService:
+    """Supply native defaults for the platform simulated by an EngineArgs test."""
+    from tests.helpers.ascend_platform import AscendGRPlatform
+    from tests.helpers.cuda_platform import CudaGRPlatform
+
+    if device == "cuda":
+        return CudaGRPlatform().create_config_service()
+    if device == "npu":
+        return AscendGRPlatform().create_config_service()
+    return BackendConfigService()
 
 
 def table_constraint(*, max_top_k: int = 128) -> ConstraintConfig:

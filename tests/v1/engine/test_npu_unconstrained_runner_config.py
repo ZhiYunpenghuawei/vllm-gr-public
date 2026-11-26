@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from tests.helpers.gr_config import engine_args_from_file
+from tests.helpers.gr_config import engine_args_from_file, platform_config_service
 from vllm_gr.config import (
     ConstraintBackendKind,
     ConstraintConfig,
@@ -20,7 +20,6 @@ from vllm_gr.config import (
     GRConfig,
     gr_config_to_mapping,
 )
-from vllm_gr.platforms.legacy import legacy_config_service
 from vllm_gr.v1.engine.beam_admission import validate_gr_device_config
 
 _V1_REQUIRED = "NPU unconstrained.*ModelRunner V1.*VLLM_USE_V2_MODEL_RUNNER=0"
@@ -105,7 +104,9 @@ def test_npu_v2_rejected_during_engine_config_before_runtime_hooks(
     )
     original_additional = config.additional_config.copy()
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *a: config)
-    monkeypatch.setattr(arg_utils_gr, "engine_config_service", lambda: legacy_config_service("npu"))
+    monkeypatch.setattr(
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service("npu")
+    )
     runtime_validation = Mock(side_effect=AssertionError("runtime initialization reached"))
     canonical_write = Mock(side_effect=AssertionError("worker configuration published"))
     monkeypatch.setattr(execution, "validate_gr_execution_config", runtime_validation)
@@ -258,7 +259,7 @@ def test_engine_config_preserves_supported_and_existing_paths(
     args = engine_args_from_file(tmp_path, gr_config_to_mapping(gr_config))
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *a: config)
     monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service(device)
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(device)
     )
     monkeypatch.setattr(config_patch, "apply_engine_core_config_sanitizer", Mock())
 

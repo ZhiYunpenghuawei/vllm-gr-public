@@ -180,17 +180,17 @@ def test_npu_budget_reaches_native_offline_and_online_frontends(
 @pytest.mark.parametrize("size,steps,widths,budget,accepted", CASES)
 def test_grpc_uses_admitted_decode_budget(size, steps, widths, budget, accepted):
     from tests.entrypoints.grpc.test_grpc_entry import engine, message
+    from tests.helpers.ascend_platform import AscendGRPlatform
     from vllm_gr.config.backend_plan import BACKEND_PLAN_KEY
+    from vllm_gr.config.resolved_choices import ResolvedChoices
     from vllm_gr.entrypoints.grpc.serving import BeamVllmEngineServicer
-    from vllm_gr.platforms.ascend.provider import NPUBackendProvider
     from vllm_gr.platforms.planning import normalize_backend_request
 
     backend = engine()
     config = _config(budget=budget, constrained=steps == 3).vllm_config
-    provider = NPUBackendProvider()
-    config.additional_config[BACKEND_PLAN_KEY] = provider.resolve(
-        normalize_backend_request(config, provider)
-    ).to_wire()
+    integration = AscendGRPlatform()
+    plan = integration.resolve(normalize_backend_request(config, integration))
+    config.additional_config[BACKEND_PLAN_KEY] = ResolvedChoices.from_plan(plan).to_wire()
     # A frontend can run on a different device and must keep the admitted budget.
     config.device_config = SimpleNamespace(device="cpu")
     config.scheduler_config.max_num_batched_tokens = 65536

@@ -8,13 +8,16 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.ascend_platform import AscendGRPlatform
+from tests.helpers.cuda_platform import CudaGRPlatform
 from tests.helpers.gr_config import worker_config
 from vllm_gr.config import SUPPORTED_BEAM_BATCH_SIZES, GRConfig
-from vllm_gr.platforms.ascend import provider as npu
-from vllm_gr.platforms.cuda import CUDA_BACKEND
 from vllm_gr.v1.worker import model_runner_patch
 from vllm_gr.v1.worker.cuda import runner_installer as cuda
 from vllm_gr.v1.worker.cuda.v1 import gpu_model_runner_patch
+
+cuda_integration = CudaGRPlatform()
+npu = AscendGRPlatform()
 
 
 @pytest.mark.l1  # type: ignore[misc]
@@ -78,14 +81,10 @@ def test_dispatcher_installs_required_and_optional_hooks_once(
         ) -> object:
             return native_result
 
-    platform_module = SimpleNamespace(
-        discover_worker_runners=lambda: (("GPUModelRunner", Runner),),
-        make_patched_prepare_inputs=gpu_model_runner_patch.make_patched_prepare_inputs,
-    )
+    monkeypatch.setattr(model_runner_patch, "get_runner_hooks", lambda: gpu_model_runner_patch)
+    monkeypatch.setattr(cuda, "install_worker_hooks", lambda: None)
     monkeypatch.setattr(
-        model_runner_patch,
-        "get_runner_hooks",
-        lambda: platform_module,
+        gpu_model_runner_patch, "discover_worker_runners", lambda: (("GPUModelRunner", Runner),)
     )
 
     bookkeeping = Runner._bookkeeping_sync
@@ -234,6 +233,7 @@ def test_dispatcher_installs_sample_tokens_hook_when_exposed(
     from vllm_gr.v1.worker.model_runner_contracts import (
         _WORKER_SAMPLE_TOKENS_PATCH_MARKER,
     )
+    from vllm_gr.v1.worker.npu import npu_model_runner_patch
 
     class Runner:
         def execute_model(self, scheduler_output: Any) -> None:
@@ -254,30 +254,22 @@ def test_dispatcher_installs_sample_tokens_hook_when_exposed(
         ) -> None:
             return None
 
+        def _update_states(self, scheduler_output: Any) -> None:
+            pass
+
         def sample_tokens(self, grammar_output: Any = None) -> Any:
-            return object()
+            return grammar_output
 
-    def fake_sample_tokens_patch(orig: Any) -> Any:
-        def patched(self: Any, grammar_output: Any = None) -> Any:
-            return orig(self, grammar_output)
-
-        setattr(patched, _WORKER_SAMPLE_TOKENS_PATCH_MARKER, True)
-        return patched
-
-    platform_module = SimpleNamespace(
-        discover_worker_runners=lambda: (("NPUModelRunner", Runner),),
-        make_patched_prepare_inputs=gpu_model_runner_patch.make_patched_prepare_inputs,
-        make_patched_sample_tokens=fake_sample_tokens_patch,
-    )
+    monkeypatch.setattr(model_runner_patch, "get_runner_hooks", lambda: npu_model_runner_patch)
     monkeypatch.setattr(
-        model_runner_patch,
-        "get_runner_hooks",
-        lambda: platform_module,
+        npu_model_runner_patch, "discover_worker_runners", lambda: (("NPUModelRunner", Runner),)
     )
 
     model_runner_patch.apply_worker_patches()
 
     assert getattr(Runner.sample_tokens, _WORKER_SAMPLE_TOKENS_PATCH_MARKER, False)
+    native_result = object()
+    assert Runner().sample_tokens(native_result) is native_result
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -294,7 +286,7 @@ def test_dispatcher_routes_platform_before_v2_flag(
     if device_type == "cuda":
         setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", use_v2)
     monkeypatch.setitem(sys.modules, "vllm.envs", envs)
-    provider = CUDA_BACKEND if device_type == "cuda" else npu.NPU_BACKEND
+    integration = cuda_integration if device_type == "cuda" else npu
     from vllm_gr.v1.worker.cuda import runner_installer as runner
 
     target = (("selected", object),)
@@ -305,8 +297,9 @@ def test_dispatcher_routes_platform_before_v2_flag(
         imported.append(name)
         return SimpleNamespace(discover_worker_runners=lambda: target)
 
-    monkeypatch.setattr(cuda if device_type == "cuda" else npu, "import_module", import_selected)
-    monkeypatch.setattr(model_runner_patch, "get_runner_hooks", provider.get_model_runner_hooks)
+    target_module = cuda.__name__ if device_type == "cuda" else AscendGRPlatform.__module__
+    monkeypatch.setattr(f"{target_module}.import_module", import_selected)
+    monkeypatch.setattr(model_runner_patch, "get_runner_hooks", integration.get_model_runner_hooks)
     assert model_runner_patch.discover_active_worker_runners() == target
     assert imported == (
         [] if device_type == "cuda" else ["vllm_gr.v1.worker.npu.npu_model_runner_patch"]

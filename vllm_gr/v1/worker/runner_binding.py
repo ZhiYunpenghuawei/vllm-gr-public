@@ -5,56 +5,57 @@
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
 from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, runtime_checkable
 
 from vllm_gr.config.backend_plan import BackendPlan
 from vllm_gr.config.resolved_choices import ResolvedChoices, read_resolved_choices
 from vllm_gr.platforms.planning import worker_plan_from_choices
 from vllm_gr.platforms.services import (
-    BoundService,
     constraint_execution_override,
-    planning_provider,
     validate_required_services,
 )
 from vllm_gr.v1.worker.runner_lifecycle import NativeRunnerAdapter
 from vllm_gr.v1.worker.stage_binding import StageBinding
 
-if TYPE_CHECKING:
-    from vllm_gr.v1.attention.backends.beam_attn import BeamAttentionImpl
+
+@runtime_checkable
+class BeamAttentionLayer(Protocol):
+    """Model-owned layer that consumes the executor from its own GR runner."""
+
+    def validate_execution(self, execution: Any) -> None: ...
+
+    def bind_gr_attention_execution(self, execution: Any) -> None: ...
+
+    def release_gr_attention_execution(self, execution: Any) -> None: ...
 
 
 logger = logging.getLogger(__name__)
 _BINDING_ATTR = "_gr_backend_binding"
 
 
-def _beam_attention_layers(runner: Any) -> tuple[BeamAttentionImpl, ...]:
+def _beam_attention_layers(runner: Any) -> tuple[BeamAttentionLayer, ...]:
     """Only visit implementations owned by this model, including wrapped models."""
     model = getattr(runner, "model", None)
-    # A model using native attention has no Beam implementation to bind.
-    if model is None or "vllm_gr.v1.attention.backends.beam_attn" not in sys.modules:
+    if model is None:
         return ()
     get_model = getattr(runner, "get_model", None)
     if callable(get_model):
         model = get_model()
-    from vllm_gr.v1.attention.backends.beam_attn import BeamAttentionImpl
 
     return tuple(
         impl
         for layer in model.modules()
-        if isinstance(impl := getattr(layer, "impl", None), BeamAttentionImpl)
+        if isinstance(impl := getattr(layer, "impl", None), BeamAttentionLayer)
     )
 
 
 def _implementation_id(service: Any) -> str | None:
     if service is None:
         return None
-    if isinstance(service, BoundService):
-        service = service.implementation
     if isinstance(service, ModuleType):
         return service.__name__
     declared = getattr(service, "implementation_id", None)
@@ -66,7 +67,7 @@ def _implementation_id(service: Any) -> str | None:
 def _close_services(services: list[Any]) -> None:
     seen = set()
     for service in reversed(services):
-        if service is None or isinstance(service, BoundService) or id(service) in seen:
+        if service is None or id(service) in seen:
             continue
         seen.add(id(service))
         close = getattr(service, "close", None)
@@ -87,14 +88,13 @@ class BackendBinding:
     constraint_execution: Any
     canonical_constraint_id: str | None = None
 
-    attention_layers: tuple[BeamAttentionImpl, ...] = ()
+    attention_layers: tuple[BeamAttentionLayer, ...] = ()
 
     stage: StageBinding | None = None
 
     def detach_attention(self) -> None:
         for impl in self.attention_layers:
-            if vars(impl).get("execution") is self.attention_executor:
-                del impl.execution
+            impl.release_gr_attention_execution(self.attention_executor)
 
     def report(self) -> dict[str, Any]:
         return {
@@ -125,7 +125,7 @@ def close_backend_binding(runner: Any) -> None:
 
 def bind_backend_services(runner: Any) -> BackendBinding | None:
     """Validate the engine plan locally, then publish all services atomically."""
-    from vllm_gr.platforms.loader import activate_current_backend
+    from vllm_gr.platforms.table import current_gr_platform
 
     config = getattr(runner, "vllm_config", None)
     expected = read_resolved_choices(config)
@@ -138,9 +138,8 @@ def bind_backend_services(runner: Any) -> BackendBinding | None:
         if ResolvedChoices.from_plan(existing.plan) != expected:
             raise RuntimeError("Runner backend plan changed; reload its owned resources first")
         return existing
-    provider = activate_current_backend()
-    plan = worker_plan_from_choices(config, expected, provider=provider)
-    selected = planning_provider(provider)
+    selected = current_gr_platform()
+    plan = worker_plan_from_choices(config, expected, integration=selected)
     selected.validate_worker(plan=plan, native_runner=runner)
     required = plan.required_services
     device = getattr(runner, "device", None)
@@ -201,7 +200,7 @@ def bind_backend_services(runner: Any) -> BackendBinding | None:
         )
         validate_required_services(plan, required, binding.report()["services"], "Backend worker")
         for impl in layers:
-            impl.execution = attention
+            impl.bind_gr_attention_execution(attention)
         setattr(runner, _BINDING_ATTR, binding)
         return binding
     except BaseException:

@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.ascend_platform import AscendGRPlatform
+from tests.helpers.cuda_platform import CudaGRPlatform
 from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import (
     BACKEND_PLAN_KEY,
@@ -22,15 +24,14 @@ from vllm_gr.config.backend_plan import (
     read_backend_plan,
 )
 from vllm_gr.config.parser import parse_gr_config
-from vllm_gr.platforms import loader
-from vllm_gr.platforms.ascend import NPU_BACKEND
-from vllm_gr.platforms.cuda import CUDA_BACKEND
+from vllm_gr.config.resolved_choices import ResolvedChoices
+from vllm_gr.platforms import table
+from vllm_gr.platforms.interface import GRPlatform
 from vllm_gr.platforms.planning import (
     admit_backend_plan,
     normalize_backend_request,
     resolve_backend_plan,
 )
-from vllm_gr.platforms.services import planning_provider, validate_planning_api
 from vllm_gr.v1.engine.worker_readiness import (
     validate_worker_readiness,
     verify_engine_backend_readiness,
@@ -40,6 +41,9 @@ from vllm_gr.v1.worker.runner_binding import (
     bind_backend_services,
     close_backend_binding,
 )
+
+cuda = CudaGRPlatform()
+ascend = AscendGRPlatform()
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
@@ -51,20 +55,6 @@ def test_historical_backend_paths_resolve_the_same_wire_and_rpc_objects() -> Non
     assert binding.bind_backend_services is bind_backend_services
     assert binding.worker_backend_readiness is worker_backend_readiness
     assert readiness.verify_engine_backend_readiness is verify_engine_backend_readiness
-    # An existing v1 envelope must be rejected even with its original valid fingerprint.
-    envelope = {
-        "plan": {
-            "schema_version": 1,
-            "plan_api_version": 1,
-            "provider_api_version": 2,
-            "backend_id": "cuda",
-            "request": {"config": {}, "native": {}, "compatibility": {}, "options": {}},
-            "choices": {"stage": "cuda.v2"},
-        },
-        "fingerprint": "60b287d597511794960c55988945c2f3c4451fd733075503432e1694fffadfa7",
-    }
-    with pytest.raises(ValueError, match="planning API version"):
-        BackendPlan.from_wire(envelope)
 
 
 class Service:
@@ -82,11 +72,9 @@ class Service:
         self.closed = True
 
 
-class Provider:
+class FakeIntegration(GRPlatform):  # type: ignore[misc]
     backend_id = "test-backend"
-    api_version = 2
-    plan_api_version: int | None = 3
-    adapter_revision = "test-adapter-v1"
+    vendor_distribution = None
 
     def __init__(self) -> None:
         self.created: list[Service] = []
@@ -95,7 +83,6 @@ class Provider:
     def resolve(self, request: BackendRequest) -> BackendPlan:
         return BackendPlan(
             self.backend_id,
-            self.api_version,
             request,
             PlanData(
                 {
@@ -110,17 +97,20 @@ class Provider:
         if self.unavailable:
             raise RuntimeError("required kernel missing")
 
-    def create_model_runner_adapter(self, *, plan: BackendPlan, native_runner: Any) -> Service:
+    def create_model_runner_adapter(self, *, plan: BackendPlan, native_runner: Any) -> Any:
         service = Service(plan, native_runner)
         self.created.append(service)
         return service
 
-    def create_attention_executor(self, *, plan: BackendPlan, device: Any) -> Service:
+    def create_attention_executor(self, *, plan: BackendPlan, device: Any) -> Any:
         service = Service(plan, device)
         self.created.append(service)
         return service
 
-    def create_constrained_topk_execution(self, *, plan: BackendPlan, device: Any) -> Service:
+    def create_constrained_topk_execution(
+        self, *, plan: BackendPlan | None = None, device: Any = None
+    ) -> Any:
+        assert plan is not None
         service = Service(plan, device)
         self.created.append(service)
         return service
@@ -133,9 +123,9 @@ def config(width: int = 16) -> Any:
 
 
 @pytest.fixture  # type: ignore[misc]
-def provider(monkeypatch: pytest.MonkeyPatch) -> Provider:
-    selected = Provider()
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: selected)
+def implementation(monkeypatch: pytest.MonkeyPatch) -> FakeIntegration:
+    selected = FakeIntegration()
+    monkeypatch.setattr(table, "current_gr_platform", lambda: selected)
     return selected
 
 
@@ -158,18 +148,21 @@ def test_rejects_nonportable_values(value: Any) -> None:
         PlanData(value)
 
 
-def test_wire_round_trip_and_repeated_admission_preserve_config(provider: Provider) -> None:
+def test_wire_round_trip_and_repeated_admission_preserve_config(
+    implementation: FakeIntegration,
+) -> None:
     native = config()
     original = parse_gr_config(native)
     plan = admit_backend_plan(native)
     assert plan is not None
     assert plan == admit_backend_plan(native)
     assert parse_gr_config(native) == original
-    assert BackendPlan.from_wire(json.loads(json.dumps(plan.to_wire()))) == plan
+    choices = ResolvedChoices.from_plan(plan)
+    assert ResolvedChoices.from_wire(json.loads(json.dumps(choices.to_wire()))) == choices
     assert len(plan.fingerprint) == 64
 
 
-def test_spawn_round_trip_preserves_plan_and_data(provider: Provider) -> None:
+def test_spawn_round_trip_preserves_plan_and_data(implementation: FakeIntegration) -> None:
     plan = admit_backend_plan(config())
     assert plan is not None
     data = PlanData({"options": {"tiles": [32, 64]}, "name": "external"})
@@ -192,40 +185,22 @@ def test_spawn_round_trip_preserves_plan_and_data(provider: Provider) -> None:
             process.close()
 
 
-def test_service_requirements_extend_existing_wire_plans() -> None:
-    empty = PlanData({})
-    legacy = BackendPlan(
-        "fixture", 2, BackendRequest(empty, empty, empty, empty), PlanData({"stage": "old"})
-    )
-    old = legacy.to_wire()
-    old["plan"]["schema_version"] = 1
-    old["fingerprint"] = "f880bb8af6a14cd99c38a21ba54208c71037f11bb7bf07921698a31d748c3255"
-    with pytest.raises(ValueError, match="schema"):
-        BackendPlan.from_wire(old)
-    assert legacy.fingerprint == "60b8e5a0bb1fd47e44189fee6c8dca6f445b14cfef0d5170ce011c2df15ab4b1"
-    assert "requirements" not in legacy.to_dict()
-    assert BackendPlan.from_wire(legacy.to_wire()) == legacy
-    plan = replace(legacy, requirements=ServiceRequirements(stage="external.stage"))
-    wire = plan.to_wire()
-    assert wire["plan"]["requirements"] == {"stage": "external.stage"}
-    assert BackendPlan.from_wire(wire) == plan
-    wire["plan"]["requirements"]["stage"] = "other.stage"
-    with pytest.raises(ValueError, match="fingerprint"):
-        BackendPlan.from_wire(wire)
+def test_service_requirements_round_trip_and_validate_fields() -> None:
+    requirements = ServiceRequirements(stage="fake.stage")
+    assert ServiceRequirements.from_dict(requirements.to_dict()) == requirements
     for invalid in ({"stage": " "}, {"unknown": "id"}, {"attention": None}):
         with pytest.raises(ValueError):
             ServiceRequirements.from_dict(invalid)
 
 
 def test_explicit_service_ids_bind_and_reject_matching_but_wrong_worker_reports(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        provider,
+        implementation,
         "resolve",
         lambda request: BackendPlan(
-            provider.backend_id,
-            provider.api_version,
+            implementation.backend_id,
             request,
             PlanData({}),
             requirements=ServiceRequirements(
@@ -247,19 +222,20 @@ def test_explicit_service_ids_bind_and_reject_matching_but_wrong_worker_reports(
     with pytest.raises(RuntimeError, match="attention implementation mismatch"):
         validate_worker_readiness(plan, [report, report], expected_workers=2)
     close_backend_binding(runner)
-    assert len(provider.created) == 3 and all(service.closed for service in provider.created)
+    assert len(implementation.created) == 3 and all(
+        service.closed for service in implementation.created
+    )
 
 
 @pytest.mark.parametrize("service", ["attention", "stage", "graph"])  # type: ignore[misc]
 def test_unmet_pinned_requirement_rolls_back_binding(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch, service: str
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch, service: str
 ) -> None:
     monkeypatch.setattr(
-        provider,
+        implementation,
         "resolve",
         lambda request: BackendPlan(
-            provider.backend_id,
-            provider.api_version,
+            implementation.backend_id,
             request,
             PlanData({}),
             requirements=ServiceRequirements.from_dict({service: "missing.implementation"}),
@@ -271,18 +247,17 @@ def test_unmet_pinned_requirement_rolls_back_binding(
     with pytest.raises(RuntimeError, match=service):
         bind_backend_services(runner)
     assert getattr(runner, "_gr_backend_binding", None) is None
-    assert provider.created and all(service.closed for service in provider.created)
+    assert implementation.created and all(service.closed for service in implementation.created)
 
 
 def test_canonical_table_reports_its_identity_and_keeps_its_native_owner(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        provider,
+        implementation,
         "resolve",
         lambda request: BackendPlan(
-            provider.backend_id,
-            provider.api_version,
+            implementation.backend_id,
             request,
             PlanData({"constraint": "canonical"}),
         ),
@@ -297,26 +272,36 @@ def test_canonical_table_reports_its_identity_and_keeps_its_native_owner(
     assert not table.closed and runner.constraint_backend is table
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "field,value",
-    [
-        ("schema_version", 1),
-        ("schema_version", 3),
-        ("schema_version", True),
-        ("plan_api_version", 2),
-        ("plan_api_version", 4),
-    ],
-)
-def test_wire_rejects_unsupported_schema(provider: Provider, field: str, value: Any) -> None:
-    plan = admit_backend_plan(config())
-    wire = plan.to_wire()
-    wire["plan"][field] = value
-    with pytest.raises(ValueError):
-        BackendPlan.from_wire(wire)
+@pytest.mark.parametrize("version", [1, 2, 4, True])  # type: ignore[misc]
+def test_compact_wire_rejects_unsupported_version(
+    implementation: FakeIntegration, version: int
+) -> None:
+    native = config()
+    assert admit_backend_plan(native) is not None
+    native.additional_config[BACKEND_PLAN_KEY]["format_version"] = version
+    with pytest.raises(ValueError, match="same vllm-gr version"):
+        read_backend_plan(native)
+
+
+def test_worker_rejects_retired_full_plan_envelope() -> None:
+    native = config()
+    native.additional_config[BACKEND_PLAN_KEY] = {
+        "plan": {
+            "schema_version": 2,
+            "plan_api_version": 3,
+            "provider_api_version": 2,
+            "backend_id": "fixture",
+            "request": {"config": {}, "native": {}, "compatibility": {}, "options": {}},
+            "choices": {"stage": "old"},
+        },
+        "fingerprint": "60b8e5a0bb1fd47e44189fee6c8dca6f445b14cfef0d5170ce011c2df15ab4b1",
+    }
+    with pytest.raises(ValueError, match="same vllm-gr version"):
+        read_backend_plan(native)
 
 
 def test_fingerprint_covers_choices_and_compatibility_but_not_local_device(
-    provider: Provider,
+    implementation: FakeIntegration,
 ) -> None:
     first = config()
     second = config()
@@ -328,37 +313,32 @@ def test_fingerprint_covers_choices_and_compatibility_but_not_local_device(
         plan, request=replace(plan.request, compatibility=PlanData({"adapter": "v2"}))
     )
     assert changed.fingerprint != plan.fingerprint
-    wire = plan.to_wire()
-    wire["plan"]["choices"]["custom-layout"] = "different"
-    with pytest.raises(ValueError, match="fingerprint"):
-        BackendPlan.from_wire(wire)
+    changed_choices = replace(plan, choices=PlanData({"custom-layout": "different"}))
+    assert changed_choices.fingerprint != plan.fingerprint
 
 
 def test_compact_choices_are_checked_against_worker_local_state(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     native = config()
     plan = admit_backend_plan(native)
     wire = native.additional_config[BACKEND_PLAN_KEY]
-    assert wire["format_version"] == 2
+    assert wire["format_version"] == 3
     assert "request" not in wire and "plan" not in wire and "fingerprint" not in wire
 
     def unexpected_resolve(*args: Any) -> None:
         pytest.fail("Workers must consume engine choices without running admission again")
 
-    monkeypatch.setattr(provider, "resolve", unexpected_resolve)
+    monkeypatch.setattr(implementation, "resolve", unexpected_resolve)
     assert wire["config_digest"] == plan.request.config_digest
     assert read_backend_plan(native) == plan
     wire["choices"]["runner"] = "different-runner"
     with pytest.raises(RuntimeError, match="Worker backend plan mismatch"):
         bind_backend_services(SimpleNamespace(vllm_config=native))
-    assert provider.created == []
-    wire["format_version"] = 1
-    with pytest.raises(ValueError, match="same vllm-gr version"):
-        read_backend_plan(native)
+    assert implementation.created == []
 
 
-def test_two_engines_bind_their_own_plan_runner_and_device(provider: Provider) -> None:
+def test_two_engines_bind_their_own_plan_runner_and_device(implementation: FakeIntegration) -> None:
     first = SimpleNamespace(vllm_config=config(16), device="test:0")
     second = SimpleNamespace(vllm_config=config(32), device="test:1")
     first_plan = admit_backend_plan(first.vllm_config)
@@ -369,16 +349,18 @@ def test_two_engines_bind_their_own_plan_runner_and_device(provider: Provider) -
     assert a.runner_adapter.owner is first and b.runner_adapter.owner is second
     assert a.attention_executor.owner == first.device
     assert b.constraint_execution.owner == second.device
-    assert all(service.plan == first_plan for service in provider.created[:3])
-    assert not hasattr(provider, "current_plan")
+    assert all(service.plan == first_plan for service in implementation.created[:3])
+    assert "current_plan" not in vars(implementation)
     assert bind_backend_services(first) is a
     close_backend_binding(first)
     close_backend_binding(first)
-    assert all(service.closed for service in provider.created[:3])
-    assert not any(service.closed for service in provider.created[3:])
+    assert all(service.closed for service in implementation.created[:3])
+    assert not any(service.closed for service in implementation.created[3:])
 
 
-def test_readiness_checks_actual_decode_and_per_kind_selection(provider: Provider) -> None:
+def test_readiness_checks_actual_decode_and_per_kind_selection(
+    implementation: FakeIntegration,
+) -> None:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     native = config()
@@ -418,7 +400,7 @@ def test_readiness_checks_actual_decode_and_per_kind_selection(provider: Provide
         )
 
 
-def test_readiness_rejects_graph_capture_for_an_eager_plan(provider: Provider) -> None:
+def test_readiness_rejects_graph_capture_for_an_eager_plan(implementation: FakeIntegration) -> None:
     native = config()
     plan = admit_backend_plan(native)
     runner = SimpleNamespace(vllm_config=native)
@@ -429,16 +411,20 @@ def test_readiness_rejects_graph_capture_for_an_eager_plan(provider: Provider) -
         validate_worker_readiness(plan, [report], expected_workers=1)
 
 
-def test_worker_configuration_drift_fails_before_any_factory(provider: Provider) -> None:
+def test_worker_configuration_drift_fails_before_any_factory(
+    implementation: FakeIntegration,
+) -> None:
     native = config()
     admit_backend_plan(native)
     GRConfig(beam_max_width=32).write_to_vllm_config(native)
     with pytest.raises(RuntimeError, match="plan mismatch"):
         bind_backend_services(SimpleNamespace(vllm_config=native, device="test:0"))
-    assert provider.created == []
+    assert implementation.created == []
 
 
-def test_readiness_preserves_binding_after_native_kv_cache_autofit(provider: Provider) -> None:
+def test_readiness_preserves_binding_after_native_kv_cache_autofit(
+    implementation: FakeIntegration,
+) -> None:
     native = config()
     native.model_config = SimpleNamespace(max_model_len=4096)
     plan = admit_backend_plan(native)
@@ -463,35 +449,37 @@ def test_readiness_preserves_binding_after_native_kv_cache_autofit(provider: Pro
         with pytest.raises(RuntimeError, match="runtime version mismatch"):
             validate_worker_readiness(plan, [{**report, key: "mismatched"}], expected_workers=1)
     assert binding.plan == plan
-    assert len(provider.created) == 3
+    assert len(implementation.created) == 3
 
 
-def test_worker_capability_failure_is_not_a_fallback(provider: Provider) -> None:
+def test_worker_capability_failure_is_not_a_fallback(implementation: FakeIntegration) -> None:
     native = config()
     admit_backend_plan(native)
-    provider.unavailable = True
+    implementation.unavailable = True
     with pytest.raises(RuntimeError, match="kernel missing"):
         worker_backend_readiness(SimpleNamespace(model_runner=SimpleNamespace(vllm_config=native)))
-    assert provider.created == []
+    assert implementation.created == []
 
 
 def test_partial_factory_failure_releases_already_created_services(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     native = config()
     admit_backend_plan(native)
-    monkeypatch.setattr(provider, "create_constrained_topk_execution", lambda **_: None)
+    monkeypatch.setattr(implementation, "create_constrained_topk_execution", lambda **_: None)
     runner = SimpleNamespace(vllm_config=native, device="test:0")
     with pytest.raises(RuntimeError, match="constraint execution"):
         bind_backend_services(runner)
-    assert all(service.closed for service in provider.created)
+    assert all(service.closed for service in implementation.created)
     assert getattr(runner, "_gr_backend_binding", None) is None
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
     "fault", ["missing", "count", "not-ready", "config-digest", "implementation"]
 )
-def test_readiness_requires_every_worker_to_agree(provider: Provider, fault: str) -> None:
+def test_readiness_requires_every_worker_to_agree(
+    implementation: FakeIntegration, fault: str
+) -> None:
     native = config()
     plan = admit_backend_plan(native)
     report = worker_backend_readiness(
@@ -513,7 +501,7 @@ def test_readiness_requires_every_worker_to_agree(provider: Provider, fault: str
         validate_worker_readiness(plan, reports, expected_workers=2)
 
 
-def test_failed_engine_gate_shuts_down_executor(provider: Provider) -> None:
+def test_failed_engine_gate_shuts_down_executor(implementation: FakeIntegration) -> None:
     native = config()
     admit_backend_plan(native)
     shutdown = []
@@ -531,7 +519,7 @@ def test_failed_engine_gate_shuts_down_executor(provider: Provider) -> None:
 
 @pytest.mark.parametrize("failure", [None, "local", "remote", "plan-drift"])  # type: ignore[misc]
 def test_external_launcher_readiness_gathers_each_rank(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch, failure: str | None
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch, failure: str | None
 ) -> None:
     import sys
     from unittest.mock import Mock
@@ -585,7 +573,9 @@ def test_external_launcher_readiness_gathers_each_rank(
 
 
 @pytest.mark.parametrize("service", ["runner", "attention", "constraint"])  # type: ignore[misc]
-def test_readiness_rejects_missing_required_service(provider: Provider, service: str) -> None:
+def test_readiness_rejects_missing_required_service(
+    implementation: FakeIntegration, service: str
+) -> None:
     native = config()
     plan = admit_backend_plan(native)
     report = worker_backend_readiness(
@@ -596,20 +586,40 @@ def test_readiness_rejects_missing_required_service(provider: Provider, service:
         validate_worker_readiness(plan, [report], expected_workers=1)
 
 
+@pytest.mark.parametrize("invalid", ["missing-limits", "wrong-placement", "unknown-policy"])  # type: ignore[misc]
+def test_admitted_beam_policy_rejects_missing_or_mismatched_platform_limits(invalid: str) -> None:
+    from vllm_gr.platforms.beam_requests import validate_gr_device_config
+
+    native = config()
+    native.device_config = SimpleNamespace(device="cuda")
+    plan = cuda.resolve(normalize_backend_request(native, cuda))
+    choices = plan.choices.to_dict()
+    if invalid == "missing-limits":
+        del choices["beam_limits"]
+    elif invalid == "wrong-placement":
+        choices["beam_limits"]["device_type"] = "npu"
+    else:
+        choices["beam_limits"]["host_policy"] = "vendor_package.arbitrary_function"
+    wire = ResolvedChoices.from_plan(replace(plan, choices=PlanData(choices))).to_wire()
+    native.additional_config[BACKEND_PLAN_KEY] = wire
+    with pytest.raises(ValueError, match="admission limits|admitted GR platform"):
+        validate_gr_device_config(native)
+
+
 def test_builtin_plans_are_pure_and_preserve_runner_and_decode_policy() -> None:
     native = config()
-    request = normalize_backend_request(native, CUDA_BACKEND)
-    assert CUDA_BACKEND.resolve(request) == CUDA_BACKEND.resolve(request)
-    assert CUDA_BACKEND.resolve(request).choices.to_dict()["stage"] == "cuda.v1"
+    request = normalize_backend_request(native, cuda)
+    assert cuda.resolve(request) == cuda.resolve(request)
+    assert cuda.resolve(request).choices.to_dict()["stage"] == "cuda.v1"
     native.use_v2_model_runner = True
-    request = normalize_backend_request(native, CUDA_BACKEND)
-    assert CUDA_BACKEND.resolve(request).choices.to_dict()["stage"] == "cuda.v2"
-    npu_request = normalize_backend_request(native, NPU_BACKEND)
-    choices = NPU_BACKEND.resolve(npu_request).choices.to_dict()
+    request = normalize_backend_request(native, cuda)
+    assert cuda.resolve(request).choices.to_dict()["stage"] == "cuda.v2"
+    npu_request = normalize_backend_request(native, ascend)
+    choices = ascend.resolve(npu_request).choices.to_dict()
     assert choices["stage"] == "ascend.v1"
     assert choices["decode_attention"] == "auto"
     with pytest.raises(ValueError, match="xllm"):
-        CUDA_BACKEND.resolve(
+        cuda.resolve(
             replace(
                 request,
                 config=PlanData({**request.config.to_dict(), "npu_decode_execution": "xllm"}),
@@ -617,50 +627,28 @@ def test_builtin_plans_are_pure_and_preserve_runner_and_decode_policy() -> None:
         )
 
 
-def test_legacy_provider_never_infers_a_planning_extension(provider: Provider) -> None:
-    class Legacy(Provider):
-        plan_api_version = None
-
-    old = Legacy()
-    request = normalize_backend_request(config(), old)
-    adapted = planning_provider(old)
-    assert (
-        adapted.resolve(request).choices.to_dict()["compatibility"] == "provider-api-v2-delegation"
-    )
-    with pytest.raises(ValueError, match="typed backend options"):
-        adapted.resolve(replace(request, options=PlanData({"tiles": [32]})))
-
-
-def test_bad_planning_version_and_missing_methods_fail_registration() -> None:
-    for version in (True, 1, 2, "3"):
-        with pytest.raises(ValueError, match="plan_api_version"):
-            validate_planning_api(SimpleNamespace(plan_api_version=version))
-    with pytest.raises(ValueError, match="missing methods"):
-        validate_planning_api(SimpleNamespace(plan_api_version=3))
-
-
 def test_resolver_cannot_change_request_identity(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    request = normalize_backend_request(config(), provider)
-    plan = provider.resolve(request)
-    monkeypatch.setattr(provider, "resolve", lambda _: replace(plan, backend_id="wrong"))
-    with pytest.raises(ValueError, match="provider identity"):
-        resolve_backend_plan(provider, request)
+    request = normalize_backend_request(config(), implementation)
+    plan = implementation.resolve(request)
+    monkeypatch.setattr(implementation, "resolve", lambda _: replace(plan, backend_id="wrong"))
+    with pytest.raises(ValueError, match="identity"):
+        resolve_backend_plan(implementation, request)
 
 
 def test_unknown_reserved_key_still_fails_and_invalid_plan_is_not_ignored() -> None:
     native = config()
     native.additional_config[BACKEND_PLAN_KEY] = {"invalid": True}
     assert parse_gr_config(native).beam_max_width == 16
-    with pytest.raises(ValueError, match="envelope"):
+    with pytest.raises(ValueError, match="format|choices|envelope"):
         read_backend_plan(native)
     native.additional_config["vllm_gr_backend_typo"] = 1
     with pytest.raises(ValueError, match="Removed vLLM-GR"):
         parse_gr_config(native)
 
 
-def test_disabling_gr_removes_a_previous_plan(provider: Provider) -> None:
+def test_disabling_gr_removes_a_previous_plan(implementation: FakeIntegration) -> None:
     native = config()
     assert admit_backend_plan(native) is not None
     GRConfig().write_to_vllm_config(native)
@@ -674,12 +662,12 @@ def test_ordinary_native_config_does_not_activate_a_backend(
     def unexpected() -> None:
         raise AssertionError("Native engine must not activate a GR backend")
 
-    monkeypatch.setattr(loader, "activate_current_backend", unexpected)
+    monkeypatch.setattr(table, "current_gr_platform", unexpected)
     assert admit_backend_plan(SimpleNamespace(additional_config={})) is None
 
 
 def test_binding_adopts_constraint_execution_preloaded_with_the_same_plan(
-    provider: Provider,
+    implementation: FakeIntegration,
 ) -> None:
     native = config()
     plan = admit_backend_plan(native)
@@ -689,13 +677,15 @@ def test_binding_adopts_constraint_execution_preloaded_with_the_same_plan(
     runner._gr_constraint_plan_fingerprint = plan.fingerprint
     binding = bind_backend_services(runner)
     assert binding.constraint_execution is preloaded
-    assert len(provider.created) == 2
+    assert len(implementation.created) == 2
     close_backend_binding(runner)
     assert preloaded.closed
     assert runner._gr_constraint_execution is None
 
 
-def test_failed_binding_detaches_unavailable_preloaded_constraint(provider: Provider) -> None:
+def test_failed_binding_detaches_unavailable_preloaded_constraint(
+    implementation: FakeIntegration,
+) -> None:
     native = config()
     plan = admit_backend_plan(native)
     runner = SimpleNamespace(vllm_config=native, device="test:0")
@@ -716,7 +706,7 @@ def test_failed_binding_detaches_unavailable_preloaded_constraint(provider: Prov
 
 
 def test_bound_constraint_honors_explicit_torch_oracle(
-    provider: Provider, monkeypatch: pytest.MonkeyPatch
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import sys
 
@@ -731,4 +721,64 @@ def test_bound_constraint_honors_explicit_torch_oracle(
     )
     binding = bind_backend_services(SimpleNamespace(vllm_config=native, device="test:0"))
     assert binding.constraint_execution is oracle
-    assert len(provider.created) == 2
+    assert len(implementation.created) == 2
+
+
+def test_custom_platform_binds_its_attention_layers_to_one_runner(
+    implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vllm.v1.attention.backends import registry
+
+    from vllm_gr.config import GRAttentionBackend
+    from vllm_gr.v1.attention.selector_patch import prepare_engine_attention
+
+    class VendorLayer:
+        execution: Any = None
+
+        def validate_execution(self, execution: Any) -> None:
+            assert isinstance(execution, Service)
+
+        def bind_gr_attention_execution(self, execution: Any) -> None:
+            self.execution = execution
+
+        def release_gr_attention_execution(self, execution: Any) -> None:
+            if self.execution is execution:
+                self.execution = None
+
+    native = config()
+    native.attention_config = SimpleNamespace(backend=registry.AttentionBackendEnum.CUSTOM)
+    replace(
+        GRConfig.from_vllm_config(native), attention_backend=GRAttentionBackend.CUSTOM
+    ).write_to_vllm_config(native)
+    monkeypatch.setattr(registry, "_ATTN_OVERRIDES", {})
+    with pytest.raises(ValueError, match="does not support CUSTOM"):
+        prepare_engine_attention(native)
+    implementation.beam_attention_backend = "vendor_platform.CustomAttention"
+    prepare_engine_attention(native)
+    assert registry.AttentionBackendEnum.CUSTOM.get_path() == implementation.beam_attention_backend
+    admit_backend_plan(native)
+    layer = VendorLayer()
+    model = SimpleNamespace(modules=lambda: (SimpleNamespace(impl=layer), SimpleNamespace()))
+    runner = SimpleNamespace(vllm_config=native, device="test:0", model=model)
+    bound = bind_backend_services(runner)
+    assert bound is not None and layer.execution is bound.attention_executor
+    close_backend_binding(runner)
+    assert layer.execution is None
+
+
+def test_original_builtin_limits_preserve_the_remote_frontend_policy() -> None:
+    from vllm_gr.platforms.admission import beam_limits
+
+    native = config()
+    plan = ascend.resolve(normalize_backend_request(native, ascend))
+    wire = ResolvedChoices.from_plan(plan).to_wire()
+    wire["versions"]["integration"] = "vllm_gr.platforms.ascend.integration"
+    for field in ("host_policy", "supports_dynamic_width", "supports_unconstrained"):
+        del wire["choices"]["beam_limits"][field]
+    native.additional_config[BACKEND_PLAN_KEY] = wire
+    limits = beam_limits(native)
+    assert (
+        limits.host_policy == "ascend"
+        and limits.supports_dynamic_width
+        and limits.supports_unconstrained
+    )

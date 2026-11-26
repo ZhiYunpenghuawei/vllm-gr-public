@@ -14,15 +14,12 @@ from vllm_gr.v1.worker.prefill_graph_runner import BeamPrefillGraphRunner
 
 
 @pytest.fixture(autouse=True)  # type: ignore
-def _force_non_npu(monkeypatch: pytest.MonkeyPatch) -> None:
-    import vllm_gr.v1.worker.prefill_graph_runner as prefill_graph_runner_mod
+def _select_cuda_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.helpers.cuda_platform import CudaGRPlatform
 
-    monkeypatch.setattr(prefill_graph_common, "is_npu_platform", lambda: False)
-
-    class MockCUDAProvider:
-        device_type = "cuda"
-
-    monkeypatch.setattr(prefill_graph_runner_mod, "current_platform", MockCUDAProvider())
+    monkeypatch.setattr(
+        "vllm_gr.v1.worker.prefill_graph_runner.current_gr_platform", CudaGRPlatform
+    )
 
 
 class MockModelRunner:
@@ -274,33 +271,35 @@ def test_multi_req_graph_buffers() -> None:
 
 
 def test_platform_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
-    import vllm_gr.v1.worker.prefill_graph_runner as prefill_graph_runner_mod
+    from tests.helpers.ascend_platform import AscendGRPlatform
+    from tests.helpers.cuda_platform import CudaGRPlatform
+    from tests.platforms.fake_accel import FakeGRPlatform
+    from vllm_gr.v1.worker import prefill_graph_runner as dispatcher
     from vllm_gr.v1.worker.cuda.v1.gpu_prefill_graph_runner import GPUPrefillGraphRunner
     from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-    from vllm_gr.v1.worker.prefill_graph_runner import (
-        BeamPrefillGraphRunner,
-        get_active_prefill_graph_runner_class,
-    )
 
     runner = MockModelRunner()
+    for platform_cls, runner_cls in (
+        (AscendGRPlatform, NPUPrefillGraphRunner),
+        (CudaGRPlatform, GPUPrefillGraphRunner),
+    ):
+        monkeypatch.setattr(dispatcher, "current_gr_platform", platform_cls)
+        assert dispatcher.get_active_prefill_graph_runner_class() is runner_cls
+        assert isinstance(BeamPrefillGraphRunner(runner, buckets=[512]), runner_cls)
 
-    # 1. Test NPU platform selection
-    class MockNPUPlatform:
-        device_type = "npu"
+    vendor = FakeGRPlatform()
+    monkeypatch.setattr(dispatcher, "current_gr_platform", lambda: vendor)
+    with pytest.raises(NotImplementedError, match="fakeaccel has no GR prefill graph runner"):
+        BeamPrefillGraphRunner(runner)
 
-    monkeypatch.setattr(prefill_graph_runner_mod, "current_platform", MockNPUPlatform)
-    assert get_active_prefill_graph_runner_class() is NPUPrefillGraphRunner
-    npu_runner = BeamPrefillGraphRunner(runner, buckets=[512])
-    assert isinstance(npu_runner, NPUPrefillGraphRunner)
+    class VendorRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self.model_runner = kwargs["model_runner"]
 
-    # 2. Test CUDA platform selection
-    class MockCUDAProvider:
-        device_type = "cuda"
-
-    monkeypatch.setattr(prefill_graph_runner_mod, "current_platform", MockCUDAProvider)
-    assert get_active_prefill_graph_runner_class() is GPUPrefillGraphRunner
-    gpu_runner = BeamPrefillGraphRunner(runner, buckets=[512])
-    assert isinstance(gpu_runner, GPUPrefillGraphRunner)
+    monkeypatch.setattr(vendor, "get_prefill_graph_runner_class", lambda: VendorRunner)
+    custom = BeamPrefillGraphRunner(runner)
+    assert isinstance(custom, VendorRunner)
+    assert custom.model_runner is runner
 
 
 class MockNPUAttnBuilder:

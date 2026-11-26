@@ -10,7 +10,7 @@ from typing import Any
 
 from .backend_plan import BackendPlan, PlanData, ServiceRequirements, backend_wire
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +113,4 @@ def read_resolved_choices(config: Any) -> ResolvedChoices | None:
     wire = backend_wire(config)
     if wire is None:
         return None
-    if isinstance(wire, Mapping) and "format_version" in wire:
-        return ResolvedChoices.from_wire(wire)
-    # The compatibility provider API can still supply a local BackendPlan envelope.
-    return ResolvedChoices.from_plan(BackendPlan.from_wire(wire))
+    return ResolvedChoices.from_wire(wire)

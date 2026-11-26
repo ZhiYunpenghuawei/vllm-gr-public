@@ -17,12 +17,12 @@ from typing import TYPE_CHECKING
 from vllm_gr.v1.worker import sliced_logits_patch
 
 if TYPE_CHECKING:
-    from vllm_gr.platforms.interface import GRBackendProvider
+    from vllm_gr.platforms.interface import GRPlatform
 
 logger = logging.getLogger("vllm_gr.patch")
 
 # Semantic ownership, independent of which process orchestrates an installer.
-# Built-in providers declare their hardware-owned IDs in ``patch_ids``.
+# Built-in integrations declare their hardware-owned IDs in ``patch_ids``.
 # These independent architectural assertions are checked against the authoritative
 # docs/design/patch_inventory.yaml; they do not drive installation. See the ownership
 # rationale in docs/design/runtime_patch_inventory.md.
@@ -284,26 +284,25 @@ def _apply_gr_beam_patches() -> int:
     return patch_count
 
 
-def _apply_patches(force: bool = False, *, provider: "GRBackendProvider | None" = None) -> int:
+def _apply_patches(force: bool = False, *, integration: "GRPlatform | None" = None) -> int:
     """Apply all runtime patches needed by vllm-gr."""
-    if provider is None:
-        from vllm_gr.platforms.loader import activate_current_backend
+    if integration is None:
+        from vllm_gr.platforms.table import current_gr_platform
 
-        # Fresh workers can call this before provider activation.
-        provider = activate_current_backend()
+        integration = current_gr_platform()
     try:
-        # The selected provider installs its early hooks before the Beam
+        # The selected integration installs its early hooks before the Beam
         # plan can discover ModelRunner classes or create worker processes.
-        backend_count: int = provider.apply_runtime_patches(force=force)
+        backend_count: int = integration.apply_runtime_patches(force=force)
     except Exception as exc:
         raise RuntimeError(
-            f"Runtime patches for backend {provider.backend_id!r} failed; "
+            f"Runtime patches for backend {integration.backend_id!r} failed; "
             "initialization may be partial, restart the process"
         ) from exc
     beam_count = _apply_gr_beam_patches()
     return backend_count + beam_count
 
 
-def re_apply_patches(*, provider: "GRBackendProvider | None" = None) -> int:
+def re_apply_patches(*, integration: "GRPlatform | None" = None) -> int:
     """Recheck live runtime targets and apply the required patches."""
-    return _apply_patches(force=True, provider=provider)
+    return _apply_patches(force=True, integration=integration)

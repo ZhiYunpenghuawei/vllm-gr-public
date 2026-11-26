@@ -12,9 +12,8 @@ from typing import Any, Literal
 import pytest
 import torch
 
-from tests.helpers.gr_config import engine_args_from_file
+from tests.helpers.gr_config import engine_args_from_file, platform_config_service
 from vllm_gr.config import GRConfig, gr_config_from_mapping, gr_config_to_mapping
-from vllm_gr.platforms.legacy import legacy_config_service
 from vllm_gr.v1.attention.backends.beam_attn_gpu import (
     GPUBeamAttentionBatch,
     validate_short_suffix_attention,
@@ -173,7 +172,7 @@ def _short_suffix_engine_config(
     monkeypatch.setattr(
         arg_utils_gr,
         "engine_config_service",
-        lambda: legacy_config_service("cuda" if cuda else "npu"),
+        lambda: platform_config_service("cuda" if cuda else "npu"),
     )
     return config, args
 

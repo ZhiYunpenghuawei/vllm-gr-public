@@ -222,6 +222,9 @@ def verify_engine_backend_readiness(engine: Any) -> None:
         else:
             reports = engine.model_executor.collective_rpc(worker_backend_readiness)
         validate_worker_readiness(plan, reports, expected_workers=expected)
+        from vllm_gr.platforms.beam_requests import engine_request_validator
+
+        engine._gr_validate_platform_request = engine_request_validator(engine.vllm_config)
     except BaseException:
         try:
             engine.model_executor.shutdown()

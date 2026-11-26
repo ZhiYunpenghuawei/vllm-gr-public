@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 
 from vllm_gr.config import ConstraintBackendKind
 from vllm_gr.config.models import runtime_constraint_table
-from vllm_gr.platforms.interface import ModelRunnerInstaller, ModelRunnerPatchHooks
+from vllm_gr.platforms.interface import ModelRunnerInstaller
 from vllm_gr.v1.worker.gr_context import (
     _get_gr_config,
     get_beam_graph_runtime_stats,
@@ -273,17 +273,11 @@ def make_shutdown_with_constraint_backend(
     return shutdown_with_constraint_backend
 
 
-def get_runner_hooks() -> ModelRunnerInstaller | ModelRunnerPatchHooks:
-    """Use the process-local provider, also for a fresh EngineCore child."""
-    from vllm_gr.platforms.errors import BackendNotActiveError
-    from vllm_gr.platforms.loader import activate_current_backend
-    from vllm_gr.platforms.registry import get_active_backend
+def get_runner_hooks() -> ModelRunnerInstaller:
+    """Use the installer for this process's selected native platform."""
+    from vllm_gr.platforms.table import current_gr_platform
 
-    try:
-        backend = get_active_backend()
-    except BackendNotActiveError:
-        backend = activate_current_backend()
-    return backend.get_model_runner_hooks()
+    return current_gr_platform().get_model_runner_hooks()
 
 
 def discover_active_worker_runners() -> tuple[tuple[str, type], ...]:
@@ -291,10 +285,7 @@ def discover_active_worker_runners() -> tuple[tuple[str, type], ...]:
 
 
 def is_active_worker_runner_patched(runner_class: type) -> bool:
-    hooks = get_runner_hooks()
-    if isinstance(hooks, ModelRunnerInstaller):
-        return bool(hooks.is_patched(runner_class))
-    return is_worker_runner_patched(runner_class)
+    return bool(get_runner_hooks().is_patched(runner_class))
 
 
 def install_worker_utility_hooks(worker_cls: type) -> None:
@@ -311,16 +302,11 @@ def install_worker_utility_hooks(worker_cls: type) -> None:
 
 
 def apply_worker_patches() -> None:
-    """Install the shared async guard and the selected provider's runner hooks."""
+    """Install the shared async guard and the native platform's runner hooks."""
     from vllm_gr.v1.worker.gr_async_output import install_async_output_guard
 
     install_async_output_guard()
-    hooks = get_runner_hooks()
-    if isinstance(hooks, ModelRunnerInstaller):
-        hooks.install()
-    else:
-        # Existing providers can continue to supply V1 wrapper factories.
-        install_v1_worker_hooks(hooks)
+    get_runner_hooks().install()
 
 
 def install_v1_worker_hooks(
@@ -331,7 +317,7 @@ def install_v1_worker_hooks(
     implementation_id: str | None = None,
     stage: StageBinding | None = None,
 ) -> None:
-    """Apply the V1 wrapper factories to the native classes supplied by a provider."""
+    """Apply the V1 wrapper factories to the native classes supplied by the platform integration."""
     from vllm_gr.v1.worker.model_runner_common import make_patched_execute_model
 
     if workspace_load_patcher is None:

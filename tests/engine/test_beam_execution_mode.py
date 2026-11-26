@@ -7,12 +7,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.helpers.gr_config import platform_config_service
 from vllm_gr.config import (
     ConstraintConfig,
     GRConfig,
 )
 from vllm_gr.config.execution import validate_gr_execution_config
-from vllm_gr.platforms.legacy import legacy_config_service
 
 
 def test_native_async_does_not_select_v1() -> None:
@@ -125,7 +125,7 @@ def test_v1_reduction_policy_scope_overrides_and_cache_identity(
     )
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *a: config)
     monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service(device_type)
+        arg_utils_gr, "engine_config_service", lambda: platform_config_service(device_type)
     )
     args = SimpleNamespace(
         additional_config={

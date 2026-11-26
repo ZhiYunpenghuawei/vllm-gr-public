@@ -129,10 +129,8 @@ class NPUEagerBeamStageRunner:
                     plan.execution, self.attention_batch.sessions
                 )
             return
-        from vllm_gr.v1.worker.gr_context import (
-            _create_beam_context,
-            _get_gr_config,
-        )
+        from vllm_gr.platforms.ascend.decode import create_beam_context
+        from vllm_gr.v1.worker.gr_context import _get_gr_config
 
         execution = plan.execution
         if self.prefill_candidates is None:
@@ -170,7 +168,7 @@ class NPUEagerBeamStageRunner:
             ):
                 if context is not None and context.registry.num_active_sessions:
                     raise RuntimeError("cannot replace an active NPU Beam eager fallback context")
-                context = _create_beam_context(
+                context = create_beam_context(
                     self.worker,
                     config,
                     max_batch=execution.batch_size,

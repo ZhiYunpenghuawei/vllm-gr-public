@@ -510,10 +510,10 @@ def test_extended_generation_fits_native_kv_reorder_buffer(
 
 @pytest.mark.l1
 def test_remote_frontend_uses_admitted_kv_geometry_and_runner() -> None:
+    from tests.helpers.ascend_platform import AscendGRPlatform
     from vllm_gr.config import GRConfig
     from vllm_gr.config.backend_plan import BACKEND_PLAN_KEY
     from vllm_gr.config.resolved_choices import ResolvedChoices
-    from vllm_gr.platforms.ascend import NPU_BACKEND
     from vllm_gr.platforms.planning import normalize_backend_request
     from vllm_gr.v1.engine.beam_admission import validate_gr_device_config
 
@@ -526,7 +526,8 @@ def test_remote_frontend_uses_admitted_kv_geometry_and_runner() -> None:
     GRConfig(
         constraint=ConstraintConfig(), beam_max_width=2, beam_max_decode_steps=5
     ).write_to_vllm_config(config)
-    plan = NPU_BACKEND.resolve(normalize_backend_request(config, NPU_BACKEND))
+    integration = AscendGRPlatform()
+    plan = integration.resolve(normalize_backend_request(config, integration))
     config.additional_config[BACKEND_PLAN_KEY] = ResolvedChoices.from_plan(plan).to_wire()
     config.device_config.device = "cpu"
     config.use_v2_model_runner = True

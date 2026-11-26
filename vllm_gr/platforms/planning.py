@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Normalize engine inputs and admit plans without storing provider state."""
+"""Normalize engine inputs and admit plans without storing runtime state."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from enum import Enum
-from importlib import metadata
 from typing import Any
 
 from vllm_gr.config.backend_plan import (
@@ -19,7 +18,9 @@ from vllm_gr.config.backend_plan import (
 )
 from vllm_gr.config.resolved_choices import ResolvedChoices
 
-from .loader import external_provider_entry_points
+from .compat import installed_version
+from .identity import qualified_class_name
+from .interface import GRPlatform
 
 BACKEND_OPTIONS_KEY = "vllm_gr_backend_options"
 
@@ -63,37 +64,23 @@ def _primitive(value: Any) -> Any:
     return value
 
 
-def _version(distribution: str | None) -> str | None:
-    if distribution is None:
-        return None
-    try:
-        return metadata.version(distribution)
-    except metadata.PackageNotFoundError:
-        return None
-
-
-def provider_compatibility(provider: Any) -> PlanData:
-    """Capture versions outside resolve(), which must be pure."""
+def integration_versions(integration: GRPlatform) -> PlanData:
+    """Capture the selected implementation and package versions across ranks."""
     from vllm_gr.version import __version__
 
-    distributions = []
-    for entry in external_provider_entry_points():
-        if entry.name == provider.backend_id and entry.dist is not None:
-            distributions.append((entry.dist.metadata["Name"], entry.dist.version))
+    vendor = integration.vendor_distribution
     return PlanData(
         {
             "gr": __version__,
-            "vllm": _version("vllm"),
-            "vendor_distribution": getattr(provider, "vendor_distribution", None),
-            "vendor": _version(getattr(provider, "vendor_distribution", None)),
-            "provider_distributions": sorted(distributions),
-            "provider_class": f"{type(provider).__module__}.{type(provider).__qualname__}",
-            "adapter_revision": getattr(provider, "adapter_revision", "legacy-v2"),
+            "vllm": installed_version("vllm"),
+            "vendor_distribution": vendor,
+            "vendor": installed_version(vendor) if vendor else None,
+            "integration": qualified_class_name(type(integration)),
         }
     )
 
 
-def normalize_backend_request(config: Any, provider: Any) -> BackendRequest:
+def normalize_backend_request(config: Any, integration: GRPlatform) -> BackendRequest:
     from vllm_gr.config import GRConfig
 
     native: dict[str, Any] = {}
@@ -128,38 +115,36 @@ def normalize_backend_request(config: Any, provider: Any) -> BackendRequest:
     additional = getattr(config, "additional_config", None)
     options = additional.get(BACKEND_OPTIONS_KEY, {}) if isinstance(additional, Mapping) else {}
     gr = GRConfig.from_vllm_config(config)
-    admission_geometry = getattr(provider, "beam_kv_geometry", None)
-    if gr.beam_max_decode_steps > 3 and admission_geometry is not None:
-        native["local_kv_heads"], native["head_size"] = admission_geometry(config)
+    if gr.beam_max_decode_steps > 3:
+        geometry = integration.beam_kv_geometry(config)
+        if geometry is not None:
+            native["local_kv_heads"], native["head_size"] = geometry
     gr_fields = asdict(gr)
     gr_fields["beam_execution_mode"] = "v1" if gr.beam_max_width is not None else None
     return BackendRequest(
         config=PlanData(_primitive(gr_fields)),
         native=PlanData(native),
-        compatibility=provider_compatibility(provider),
+        compatibility=integration_versions(integration),
         options=PlanData(options),
     )
 
 
-def resolve_backend_plan(provider: Any, request: BackendRequest) -> BackendPlan:
-    from .services import planning_provider
-
-    plan = planning_provider(provider).resolve(request)
+def resolve_backend_plan(integration: GRPlatform, request: BackendRequest) -> BackendPlan:
+    plan = integration.resolve(request)
     if not isinstance(plan, BackendPlan):
         raise TypeError("Backend resolve() must return BackendPlan")
-    if (plan.backend_id, plan.provider_api_version, plan.request) != (
-        provider.backend_id,
-        provider.api_version,
+    if (plan.backend_id, plan.request) != (
+        integration.backend_id,
         request,
     ):
-        raise ValueError("Backend resolve() changed request or provider identity")
+        raise ValueError("Backend resolve() changed request or integration identity")
     return plan
 
 
 def _normalize_with_admitted_length(
-    config: Any, provider: Any, admitted_length: Any
+    config: Any, integration: GRPlatform, admitted_length: Any
 ) -> BackendRequest:
-    request = normalize_backend_request(config, provider)
+    request = normalize_backend_request(config, integration)
     native = request.native.to_dict()
     model = native["model_config"]
     actual_length = model["max_model_len"]
@@ -178,19 +163,18 @@ def _normalize_with_admitted_length(
 
 
 def worker_plan_from_choices(
-    config: Any, expected: ResolvedChoices, *, provider: Any = None
+    config: Any, expected: ResolvedChoices, *, integration: GRPlatform | None = None
 ) -> BackendPlan:
     """Verify local inputs and consume the choices admitted by the engine."""
-    from .loader import activate_current_backend
+    from .table import current_gr_platform
 
-    if provider is None:
-        provider = activate_current_backend()
+    if integration is None:
+        integration = current_gr_platform()
     request = _normalize_with_admitted_length(
-        config, provider, expected.limits.to_dict()["max_model_len"]
+        config, integration, expected.limits.to_dict()["max_model_len"]
     )
     local = BackendPlan(
-        provider.backend_id,
-        provider.api_version,
+        integration.backend_id,
         request,
         expected.choices,
         requirements=expected.requirements,
@@ -206,7 +190,7 @@ def admit_backend_plan(config: Any) -> BackendPlan | None:
     """Attach only serializable plan data after EngineArgs has normalized GR."""
     from vllm_gr.config import GRConfig
 
-    from .loader import activate_current_backend
+    from .table import current_gr_platform
 
     additional = getattr(config, "additional_config", None)
     if isinstance(additional, Mapping) and LEGACY_PLAN_KEY in additional:
@@ -223,8 +207,8 @@ def admit_backend_plan(config: Any) -> BackendPlan | None:
                 key: value for key, value in additional.items() if key != BACKEND_PLAN_KEY
             }
         return None
-    provider = activate_current_backend()
-    plan = resolve_backend_plan(provider, normalize_backend_request(config, provider))
+    integration = current_gr_platform()
+    plan = resolve_backend_plan(integration, normalize_backend_request(config, integration))
     additional = getattr(config, "additional_config", None)
     if additional is not None and not isinstance(additional, Mapping):
         raise TypeError("Backend plans require mapping additional_config")

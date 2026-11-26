@@ -586,11 +586,11 @@ def load_constraint_backend(
 
     if not config.enabled:
         return None
-    backend_kind = (
-        ConstraintBackendKind.CUDA
-        if config.backend is ConstraintBackendKind.AUTO
-        else config.backend
-    )
+    backend_kind = config.backend
+    if backend_kind is ConstraintBackendKind.AUTO:
+        from vllm_gr.platforms.config import current_constraint_backend
+
+        backend_kind = ConstraintBackendKind(current_constraint_backend("cuda"))
     _validate_loader_inputs(
         device=device,
         vocab_size=vocab_size,
@@ -627,6 +627,30 @@ def load_constraint_backend(
         expected_vocab_size=vocab_size,
         expected_format=config.format,
     )
+    if backend_kind is ConstraintBackendKind.PLATFORM:
+        from vllm_gr.platforms.table import current_gr_platform
+
+        platform = current_gr_platform()
+        platform_backend = platform.create_constraint_backend(
+            table, device=device, dtype=dtype, max_rows=max_rows, max_top_k=max_top_k
+        )
+        # A ready backend owns its tables until close(). Check metadata before
+        # publishing it to the runner or replacing the active version on reload.
+        try:
+            info = platform_backend.info
+            if (
+                info.backend is not ConstraintBackendKind.PLATFORM
+                or info.table_metadata != table.metadata
+                or info.max_rows < max_rows
+                or info.max_top_k < max_top_k
+            ):
+                raise ValueError(
+                    f"GR platform {platform.backend_id!r} returned incompatible constraint metadata"
+                )
+        except BaseException:
+            platform_backend.close()
+            raise
+        return platform_backend
     if backend_kind is ConstraintBackendKind.CPU:
         info = _backend_info(
             table,

@@ -13,25 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 def configure_model_runner_default() -> None:
-    """Default vllm-gr processes to the V1 model runner.
-
-    The GR beam-search worker patches target the V1 GPU/NPU model runner
-    lifecycle by default. vLLM can enable ModelRunner V2 automatically for
-    supported models such as Qwen3, so set the environment default before
-    vLLM constructs its configuration.
-
-    An explicit ``VLLM_USE_V2_MODEL_RUNNER=1`` (or any truthy spelling) is
-    preserved as an opt-in experimental path: the V2 runner is
-    beam_search-only (``execution_mode=v1`` persistent GR stage path).  The
-    LEGACY ``beam_data`` frame stack is not supported under V2 and fails fast.
-    """
+    """Apply the selected platform's runner default before native config creation."""
     value = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
     if value is None:
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-        logger.info(
-            "VLLM_USE_V2_MODEL_RUNNER was not set; defaulting to ModelRunner V1 "
-            "for vllm-gr compatibility."
-        )
+        from vllm_gr.platforms.errors import UnsupportedBackendError
+        from vllm_gr.platforms.table import current_gr_platform
+
+        try:
+            platform = current_gr_platform()
+        except UnsupportedBackendError:
+            return
+        default = platform.default_use_v2_model_runner
+        if default is not None:
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = str(int(default))
         return
 
     normalized = value.strip().lower()

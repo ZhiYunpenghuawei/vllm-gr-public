@@ -177,8 +177,11 @@ def test_sample_tokens_v2_stage_bypass() -> None:
 def test_configure_model_runner_default_normalizes_opt_in(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from tests.helpers.cuda_platform import CudaGRPlatform
     from vllm_gr.engine.startup import configure_model_runner_default
+    from vllm_gr.platforms import table
 
+    monkeypatch.setattr(table, "current_gr_platform", CudaGRPlatform)
     for value in (None, "0", "false", "no", "off", "1", "true", "yes", "on"):
         caplog.clear()
         if value is None:

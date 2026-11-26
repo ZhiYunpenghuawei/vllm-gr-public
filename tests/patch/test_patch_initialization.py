@@ -75,11 +75,12 @@ def test_runtime_patch_order_preserves_ascend_initialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vllm_gr.patch as runtime_patch
-    from vllm_gr.platforms import loader
-    from vllm_gr.platforms.ascend import NPU_BACKEND, spawn_patch
+    from tests.helpers.ascend_platform import AscendGRPlatform
+    from vllm_gr.platforms import table
+    from vllm_gr.platforms.ascend import spawn_patch
     from vllm_gr.v1.worker.npu import startup_patch
 
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: NPU_BACKEND)
+    monkeypatch.setattr(table, "current_gr_platform", AscendGRPlatform)
     call_order: list[str] = []
 
     def apply_npu_spawn() -> int:
@@ -267,14 +268,14 @@ def test_plugin_exposes_simple_per_patch_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     startup = import_module("vllm_gr.engine.startup")
-    loader = import_module("vllm_gr.platforms.loader")
+    table = import_module("vllm_gr.platforms.table")
     plugin = import_module("vllm_gr.plugin")
     runtime_patch = import_module("vllm_gr.patch")
 
     report = BeamPatchReport((BeamPatchResult("flat_logprobs", BeamPatchStatus.APPLIED),))
-    provider = mock.Mock()
+    integration = mock.Mock()
     monkeypatch.setattr(startup, "configure_model_runner_default", mock.Mock())
-    monkeypatch.setattr(loader, "activate_current_backend", mock.Mock(return_value=provider))
+    monkeypatch.setattr(table, "current_gr_platform", mock.Mock(return_value=integration))
     reapply = mock.Mock(return_value=1)
     monkeypatch.setattr(runtime_patch, "re_apply_patches", reapply)
     monkeypatch.setattr(
@@ -285,8 +286,8 @@ def test_plugin_exposes_simple_per_patch_status(
 
     state = plugin.initialize_runtime()
 
-    provider.check_environment.assert_called_once_with()
-    reapply.assert_called_once_with(provider=provider)
+    integration.check_environment.assert_called_once_with()
+    reapply.assert_called_once_with(integration=integration)
     assert state == {
         "patch_count": 1,
         "patches": {"flat_logprobs": "applied"},

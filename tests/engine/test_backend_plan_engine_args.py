@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from tests.platforms.test_backend_plan import Provider
+from tests.helpers.cuda_platform import CudaGRPlatform
+from tests.platforms.test_backend_plan import FakeIntegration
 from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import (
     BACKEND_PLAN_KEY,
@@ -19,12 +20,12 @@ from vllm_gr.config.backend_plan import (
     ServiceRequirements,
     read_backend_plan,
 )
+from vllm_gr.config.resolved_choices import ResolvedChoices
 from vllm_gr.engine import arg_utils_gr
-from vllm_gr.platforms import config as platform_config
-from vllm_gr.platforms import loader
+from vllm_gr.platforms import table
 from vllm_gr.platforms.config import BackendConfigService
-from vllm_gr.platforms.cuda import CUDA_BACKEND
-from vllm_gr.platforms.legacy import legacy_config_service
+
+cuda = CudaGRPlatform()
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
@@ -36,10 +37,7 @@ def test_engine_args_round_trip_keeps_the_admitted_backend_plan(
         additional_config={}, scheduler_config=SimpleNamespace(async_scheduling=True)
     )
     monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: native)
-    monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: legacy_config_service("cuda")
-    )
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: CUDA_BACKEND)
+    monkeypatch.setattr(table, "current_gr_platform", lambda: cuda)
     args = SimpleNamespace(
         additional_config={
             "vllm_gr": {
@@ -78,34 +76,39 @@ def test_backend_plan_changes_in_native_compilation_hash() -> None:
     )
     plan = BackendPlan(
         backend_id="example",
-        provider_api_version=2,
         request=request,
         choices=PlanData({}),
         requirements=ServiceRequirements(graph="example.graph.v1"),
     )
 
-    def compilation_hash(admitted: BackendPlan) -> str:
-        config.additional_config = {BACKEND_PLAN_KEY: admitted.to_wire()}
+    def compilation_hash(choices: ResolvedChoices) -> str:
+        config.additional_config = {BACKEND_PLAN_KEY: choices.to_wire()}
         result = config.compute_hash()
         assert isinstance(result, str)
         return result
 
-    original = compilation_hash(plan)
+    choices = ResolvedChoices.from_plan(plan)
+    original = compilation_hash(choices)
     assert (
-        compilation_hash(BackendPlan.from_wire(json.loads(json.dumps(plan.to_wire())))) == original
+        compilation_hash(ResolvedChoices.from_wire(json.loads(json.dumps(choices.to_wire()))))
+        == original
     )
     for changed in (
         replace(plan, request=replace(request, native=PlanData({"use_v2_model_runner": True}))),
         replace(plan, requirements=ServiceRequirements(graph="example.graph.v2")),
         replace(plan, request=replace(request, compatibility=PlanData({"adapter_revision": "2"}))),
     ):
-        assert compilation_hash(changed) != original
+        assert compilation_hash(ResolvedChoices.from_plan(changed)) != original
 
 
-def test_external_policy_defaults_reach_engine_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("requested_worker", ["auto", "user.CustomWorker"])  # type: ignore[misc]
+def test_platform_policy_defaults_reach_engine_plan(
+    monkeypatch: pytest.MonkeyPatch, requested_worker: str
+) -> None:
     events: list[str] = []
 
     class Policy(BackendConfigService):  # type: ignore[misc]
+        worker_cls = "vendor.SpecializedWorker"
         default_worker_decision = True
 
         def apply_native_defaults(self, config: SimpleNamespace) -> None:
@@ -121,18 +124,25 @@ def test_external_policy_defaults_reach_engine_plan(monkeypatch: pytest.MonkeyPa
             assert config is native
             events.append("finalize")
 
-    provider = Provider()
-    monkeypatch.setattr(provider, "create_config_service", Policy, raising=False)
-    monkeypatch.setattr(platform_config, "get_active_backend", lambda: provider)
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: provider)
+    integration = FakeIntegration()
+    monkeypatch.setattr(integration, "create_config_service", Policy, raising=False)
+    monkeypatch.setattr(table, "current_gr_platform", lambda: integration)
     native = SimpleNamespace(
         additional_config={},
         device_config=SimpleNamespace(device="cuda:0"),
         cache_config=SimpleNamespace(block_size=8),
         scheduler_config=SimpleNamespace(async_scheduling=True),
     )
-    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: native)
+
+    def create(args: Any, *_: Any) -> Any:
+        assert args.worker_cls == (
+            Policy.worker_cls if requested_worker == "auto" else requested_worker
+        )
+        return native
+
+    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", create)
     args = SimpleNamespace(
+        worker_cls=requested_worker,
         additional_config={
             "vllm_gr": {
                 "gr": {
@@ -141,11 +151,12 @@ def test_external_policy_defaults_reach_engine_plan(monkeypatch: pytest.MonkeyPa
                     "constraint_mode": "none",
                 }
             }
-        }
+        },
     )
     plan = read_backend_plan(arg_utils_gr.create_engine_config(args))
+    assert args.worker_cls == requested_worker
     assert events == ["defaults", "validate", "finalize"]
-    assert plan is not None and plan.backend_id == provider.backend_id
+    assert plan is not None and plan.backend_id == integration.backend_id
     assert plan.request.native.to_dict()["cache_config"]["block_size"] == 64
     assert plan.request.config.to_dict()["beam_worker_decision"] is True
 
@@ -159,7 +170,7 @@ def test_frontend_settings_are_isolated_from_snapshot_plan_and_graph_hash(
     from vllm_gr.config.parser import gr_config_to_mapping, resolve_startup_config
     from vllm_gr.platforms.planning import admit_backend_plan
 
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: CUDA_BACKEND)
+    monkeypatch.setattr(table, "current_gr_platform", lambda: cuda)
 
     def build(host: str, port: int | None, width: int) -> tuple[dict[str, Any], str, str]:
         config, bind_host, bind_port = resolve_startup_config(

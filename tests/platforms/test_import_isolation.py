@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -84,25 +85,16 @@ for module_name in (
 ):
     assert module_name not in sys.modules, module_name
 
-from vllm_gr.platforms.loader import load_backend_plugins
+from vllm_gr.platforms.table import BUILTIN_PROBES
+assert set(BUILTIN_PROBES) == {"cuda", "ascend"}
+assert "torch" not in sys.modules and "vllm" not in sys.modules
 
-load_backend_plugins()
-
-for module_name in (
-    "torch",
-    "torch_npu",
-    "vllm",
-    "vllm_ascend",
-    "vllm_gr.v1.worker.cuda.v1.gpu_model_runner_patch",
-    "vllm_gr.v1.worker.npu.npu_model_runner_patch",
-    "vllm_gr.v1.attention.backends.beam_attn_gpu",
-    "vllm_gr.v1.attention.backends.beam_attn_npu",
-    "vllm_gr.v1.ascend_compat",
-    "vllm_gr.platforms.ascend.config_patch",
-    "vllm_gr.v1.worker.npu.startup_patch",
-    "vllm_gr.v1.worker.npu.kv_layout_patch",
-):
-    assert module_name not in sys.modules, module_name
+from tests.helpers.native_platform import native_platform
+import vllm.platforms
+vllm.platforms.current_platform = native_platform("CUDA", "cuda")
+from vllm_gr.platforms.table import current_gr_platform
+assert current_gr_platform().backend_id == "cuda"
+assert "vllm_gr.platforms.ascend.platform" not in sys.modules
 """
 
     subprocess.run(
@@ -112,6 +104,47 @@ for module_name in (
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_obsolete_installed_entry_point_cannot_replace_native_cuda(tmp_path: Path) -> None:
+    # Reproduce an environment that still contains a distribution from the
+    # retired plugin system. Its broken import must be irrelevant to selection.
+    dist = tmp_path / "stale_gr_plugin-1.0.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Name: stale-gr-plugin\nVersion: 1.0\n")
+    (dist / "entry_points.txt").write_text(
+        "[vllm_gr.platform_backends]\ncuda = missing_plugin:replacement\n"
+    )
+    code = """
+import os
+import sys
+from importlib import metadata
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+assert any(entry.value == "missing_plugin:replacement" for entry in
+           metadata.entry_points(group="vllm_gr.platform_backends"))
+from tests.helpers.native_platform import native_platform
+import vllm.platforms as native
+native.current_platform = native_platform("CUDA","cuda")
+os.environ["VLLM_GR_BACKEND"] = "old-replacement"
+os.environ["VLLM_GR_DISABLE_BUILTIN_BACKENDS"] = "cuda"
+
+installed_entry_points = metadata.entry_points
+def current_group_only(*, group):
+    assert group == "vllm_gr.platform_plugins", group
+    return installed_entry_points(group=group)
+with patch.object(metadata, "entry_points", side_effect=current_group_only):
+    from vllm_gr.platforms.table import current_gr_platform
+
+    assert type(current_gr_platform()).__module__ == "vllm_gr.platforms.cuda.platform"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.l1  # type: ignore[misc]
@@ -126,7 +159,7 @@ import sys
 # imports are properties of the machine image, not of vllm-gr's backend
 # selection, so they cannot be forbidden here. The enforceable isolation
 # contract is that vllm-gr's own Ascend integration stays unloaded while the
-# CUDA provider initializes.
+# CUDA integration initializes.
 blocked = (
     "vllm_gr.v1.ascend_compat",
     "vllm_gr.platforms.ascend.config_patch",
@@ -143,18 +176,16 @@ def reject_ascend(event, args):
 
 sys.addaudithook(reject_ascend)
 import vllm.platforms
-from vllm.platforms.interface import Platform
+from tests.helpers.cuda_platform import CudaGRPlatform
+from vllm.platforms.cuda import CudaPlatform
 
-# Synthetic device identity: exercise host initialization, not CUDA execution.
-# The identity carries the upstream enum and class lineage, so provider
-# selection never has to infer CUDA from tensor placement alone.
-platform = Platform()
-platform._enum = "CUDA"
-platform.device_type = "cuda"
-platform.device_name = "cuda"
+# The real CUDA class provides concrete methods needed during vLLM startup.
+platform = CudaPlatform()
+assert isinstance(platform, CudaGRPlatform.native_platform_type)
+if not __import__("torch").cuda.is_available():
+    # No device is visible on host-only builds.
+    platform.get_device_capability = lambda *args, **kwargs: None
 vllm.platforms.current_platform = platform
-from vllm_gr.platforms import loader
-loader.entry_points = lambda **kwargs: ()
 
 from vllm_gr.plugin import initialize_runtime
 first = initialize_runtime()
@@ -212,13 +243,10 @@ if module_name == "vllm_gr.v1.worker.model_runner_patch":
     import vllm.platforms
     from vllm.platforms.interface import Platform
 
-    platform = Platform()
-    platform._enum = "CUDA"
-    platform.device_type = "cuda"
-    platform.device_name = "cuda"
+    from tests.helpers.native_platform import native_platform
+    platform = native_platform("CUDA", "cuda")
     vllm.platforms.current_platform = platform
 
-    from vllm_gr.platforms import loader
     from vllm_gr.v1.worker.cuda import runner_installer as runner
     from vllm_gr.v1.worker import model_runner_patch
     class Worker:
@@ -234,7 +262,6 @@ if module_name == "vllm_gr.v1.worker.model_runner_patch":
     v2.is_patched = lambda cls: bool(getattr(cls, "_installed", False))
     install_v2 = Mock(side_effect=lambda: setattr(native_class, "_installed", True))
     v2._apply_v2_runner_patches = install_v2
-    loader.entry_points = lambda **kwargs: ()
     runner.install_worker_hooks = Mock()
     model_runner_patch.apply_worker_patches()
     install_v2.assert_not_called()

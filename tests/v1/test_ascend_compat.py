@@ -24,7 +24,11 @@ def _vendor_platform(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, mock.Mock]:
 
     native = mock.Mock(return_value="vendor.NativeBackend")
 
-    class NPUPlatform:
+    from tests.helpers.ascend_platform import AscendGRPlatform
+
+    class NPUPlatform(AscendGRPlatform.native_platform_type):  # type: ignore[misc]
+        device_type = "npu"
+
         @classmethod
         def get_attn_backend_cls(
             cls, selected_backend: Any, attn_selector_config: Any, num_heads: int | None = None
@@ -137,7 +141,9 @@ def test_selector_cache_reset_preserves_installed_callable(monkeypatch: pytest.M
     import vllm.platforms
     import vllm.v1.attention.selector as selector
 
-    monkeypatch.setattr(vllm.platforms, "current_platform", SimpleNamespace(_enum="CUDA"))
+    from tests.helpers.native_platform import native_platform
+
+    monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("CUDA", "cuda"))
 
     @lru_cache
     def lookup(key: str) -> object:
@@ -335,7 +341,7 @@ def test_worker_installs_config_filter_before_constructor(
         def init_device(self) -> None:
             raise AssertionError("config validation precedes device initialization")
 
-    setattr(worker_module, "NPUWorker", NPUWorker)
+    monkeypatch.setattr(worker_module, "NPUWorker", NPUWorker, raising=False)
     monkeypatch.setattr(startup_patch, "is_npu_platform", lambda: True)
     assert startup_patch.patch_npu_worker_init_device() == 1
     NPUWorker()
@@ -367,7 +373,7 @@ def test_worker_rechecks_config_bindings_without_rewrapping_device_hook(
         def init_device(self) -> None:
             raise AssertionError("constructor validation must precede device initialization")
 
-    setattr(worker_module, "NPUWorker", NPUWorker)
+    monkeypatch.setattr(worker_module, "NPUWorker", NPUWorker, raising=False)
     monkeypatch.setattr(startup_patch, "is_npu_platform", lambda: True)
     assert startup_patch.patch_npu_worker_init_device() == 1
     device_wrapper = NPUWorker.init_device
@@ -422,9 +428,9 @@ def test_ascend_config_filter_preserves_engine_identity_and_gr_config(
         BackendPlan,
         BackendRequest,
         PlanData,
-        read_backend_plan,
     )
     from vllm_gr.config.parser import parse_gr_config
+    from vllm_gr.config.resolved_choices import ResolvedChoices, read_resolved_choices
     from vllm_gr.platforms.planning import BACKEND_OPTIONS_KEY
 
     seen: list[Any] = []
@@ -439,11 +445,11 @@ def test_ascend_config_filter_preserves_engine_identity_and_gr_config(
     empty = PlanData({})
     for width in (4, 8):
         request = BackendRequest(PlanData({"beam_max_width": width}), empty, empty, empty)
-        plan = BackendPlan("ascend", 2, request, empty)
+        choices = ResolvedChoices.from_plan(BackendPlan("ascend", request, empty))
         additional = {
             "refresh": True,
             "vllm_gr": {"gr": {"beam_width": [width] * 3, "candidate_width": [width] * 3}},
-            BACKEND_PLAN_KEY: plan.to_wire(),
+            BACKEND_PLAN_KEY: choices.to_wire(),
             BACKEND_OPTIONS_KEY: {"test_option": width},
         }
         config = SimpleNamespace(additional_config=additional)
@@ -454,7 +460,7 @@ def test_ascend_config_filter_preserves_engine_identity_and_gr_config(
         assert config.additional_config is additional
         assert additional == before
         assert parse_gr_config(config) == expected
-        assert read_backend_plan(config) == plan
+        assert read_resolved_choices(config) == choices
         assert parse_gr_config(deepcopy(config)) == expected
         configs.append(config)
 

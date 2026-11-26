@@ -4,8 +4,6 @@
 
 from vllm_gr.config.backend_plan import (
     BACKEND_PLAN_KEY,
-    PLAN_API_VERSION,
-    PLAN_SCHEMA_VERSION,
     BackendPlan,
     BackendRequest,
     PlanData,
@@ -15,8 +13,6 @@ from vllm_gr.config.backend_plan import (
 
 __all__ = [
     "BACKEND_PLAN_KEY",
-    "PLAN_SCHEMA_VERSION",
-    "PLAN_API_VERSION",
     "PlanData",
     "BackendRequest",
     "ServiceRequirements",

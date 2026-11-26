@@ -4,16 +4,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from vllm_gr.config import GRConfig
 from vllm_gr.config.models import (
-    ConstraintBackendKind,
     ConstraintMode,
     configured_constraint_mode,
     runtime_constraint_table,
 )
 from vllm_gr.platforms.admission import beam_limits, validate_beam_batch
+from vllm_gr.platforms.errors import GRDeviceRequestError
 
 if TYPE_CHECKING:
     from vllm_gr.v1.beam.batch_contracts import BeamBatchRequest
@@ -22,18 +24,41 @@ if TYPE_CHECKING:
 def validate_gr_device_config(config: Any, request: BeamBatchRequest | None = None) -> None:
     """Check execution support without importing a device runtime."""
     limits = beam_limits(config)
-    device = limits.device_type
-    if device not in (None, "cuda", "npu"):
+    gr = GRConfig.from_vllm_config(config)
+    if limits.backend_id is None and limits.device_type not in (None, "cuda", "npu"):
         raise ValueError(
             "Asynchronous scheduling requires a CUDA ModelRunner or NPU ModelRunner V1"
         )
-    gr_config = GRConfig.from_vllm_config(config)
-    if gr_config.beam_sid_stage_vocab and device != "npu":
-        raise ValueError("beam.sid_stage_vocab requires NPU ModelRunner V1")
-    if device == "npu":
+    if limits.host_policy == "ascend":
         from vllm_gr.platforms.ascend.admission import validate_npu_device_config
 
-        validate_npu_device_config(limits, gr_config, request)
+        validate_npu_device_config(limits, gr, request)
+    elif gr.beam_sid_stage_vocab:
+        raise ValueError("beam.sid_stage_vocab requires NPU ModelRunner V1")
+    if configured_constraint_mode(gr) is ConstraintMode.NONE and not limits.supports_unconstrained:
+        raise ValueError("The admitted GR platform does not support unconstrained beam_search")
+    if (
+        not limits.supports_dynamic_width
+        and request is not None
+        and (
+            request.beam_params.dynamic_beam_widths is not None
+            or request.output_options.num_return_sequences != request.beam_params.beam_width
+        )
+    ):
+        raise GRDeviceRequestError("The admitted GR platform does not support dynamic Beam widths")
+
+
+def engine_request_validator(config: Any) -> Callable[[BeamBatchRequest], None] | None:
+    """Bind the installed platform's optional check once during EngineCore startup."""
+    from vllm_gr.platforms.interface import GRPlatform
+    from vllm_gr.platforms.table import current_gr_platform
+
+    platform = current_gr_platform()
+    if type(platform).validate_request is GRPlatform.validate_request:
+        return None
+    return partial(
+        platform.validate_request, beam_limits(config), GRConfig.from_vllm_config(config)
+    )
 
 
 def validate_decode_token_budget(request: BeamBatchRequest, config: Any) -> None:
@@ -47,24 +72,28 @@ def decode_batch_capacity(config: Any, beam_width: int) -> int | None:
 
 
 def validate_dynamic_width_support(config: Any) -> None:
-    if beam_limits(config).constraint_backend is None:
-        raise ValueError("dynamic_beam_widths and result_width require CUDA or NPU beam_search")
+    if not beam_limits(config).supports_dynamic_width:
+        raise ValueError(
+            "The admitted GR platform does not support dynamic_beam_widths or result_width"
+        )
 
 
 def validate_frontend_constraint_mode(
     config: Any, gr_config: GRConfig, catalog_strategy: str | None
 ) -> None:
-    placement = beam_limits(config).constraint_backend
+    limits = beam_limits(config)
     if configured_constraint_mode(gr_config) is ConstraintMode.NONE:
-        if placement is None:
-            raise ValueError("unconstrained beam_search requires CUDA or NPU")
+        if not limits.supports_unconstrained:
+            raise ValueError("The admitted GR platform does not support unconstrained beam_search")
         return
 
     table = runtime_constraint_table(gr_config)
-    backend = ConstraintBackendKind(placement or "cuda")
-    if table is None or not table.enabled or table.backend is not backend:
+    backend = limits.constraint_backend
+    if backend is None:
+        raise ValueError("The admitted GR platform does not support a canonical constraint table")
+    if table is None or not table.enabled or table.backend.value != backend:
         raise ValueError(
-            f"beam_search requires an enabled canonical {backend.value.upper()} constraint table"
+            f"beam_search requires an enabled canonical {backend.upper()} constraint table"
         )
     if catalog_strategy is not None:
         raise ValueError("catalog_strategy is not applicable to the constraint_table backend")

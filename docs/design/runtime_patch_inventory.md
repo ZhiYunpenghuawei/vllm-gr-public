@@ -10,7 +10,7 @@ rationale for each hook is in [runtime patches](module/runtime_patches.md).
 
 | Field | Meaning |
 | --- | --- |
-| Scope and backend ID | `core` patches are owned by `vllm_gr`; `backend` patches are declared by one provider. |
+| Scope and backend ID | `core` patches are owned by `vllm_gr`; `backend` patches are declared by one in-tree integration. |
 | Owner and installer | The module that owns the behavior and the callable that installs it. |
 | Risk | `critical` hooks can change upstream control flow or wire values; `high` hooks change scheduling, loading or device setup; `medium` hooks are bounded adapters. |
 | Process roles | Processes that must install or verify the hook. |
@@ -155,9 +155,9 @@ Planned Ascend runners bind the V1 stage implementation at model load. The nativ
 
 Scope: `core`; backend ID: `null`
 
-Owner: `vllm_gr/v1/attention/backends/beam_attn.py`
+Owner: `vllm_gr/v1/attention/selector_patch.py`
 
-Installer: `vllm_gr.v1.attention.backends.beam_attn register_backend decorator`
+Installer: `vllm_gr.v1.attention.selector_patch.prepare_engine_attention`
 
 Risk: `high`; process roles: `engine_core`, `worker`
 

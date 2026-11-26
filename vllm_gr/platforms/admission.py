@@ -25,6 +25,12 @@ class BeamLimits:
     runner_generation: str
     local_kv_heads: int | None
     head_size: int | None
+    backend_id: str | None = None
+    supports_unconstrained: bool = False
+    supports_dynamic_width: bool = False
+    # Only the in-tree host policies below are executable in remote frontends.
+    # A vendor can additionally validate its requests inside its own EngineCore.
+    host_policy: str | None = None
 
     def uses_retained_widths(self, config: Any) -> bool:
         options = config.deployment
@@ -41,6 +47,15 @@ class BeamLimits:
             raise ValueError("Invalid Beam admission retain_candidate_widths")
         if self.constraint_backend is not None and not isinstance(self.constraint_backend, str):
             raise ValueError("Invalid Beam admission constraint_backend")
+        if (
+            type(self.supports_unconstrained) is not bool
+            or type(self.supports_dynamic_width) is not bool
+        ):
+            raise ValueError("Invalid Beam admission capabilities")
+        if self.host_policy is not None and (
+            (self.host_policy, self.device_type) not in (("cuda", "cuda"), ("ascend", "npu"))
+        ):
+            raise ValueError("Invalid admitted GR platform host policy or placement")
         if self.runner_generation not in ("v1", "v2"):
             raise ValueError("Invalid Beam admission runner_generation")
         budget = self.max_decode_rows
@@ -71,26 +86,38 @@ def beam_limits(config: Any) -> BeamLimits:
             return cached[1]
         admitted = read_resolved_choices(config)
         assert admitted is not None
-        choices = admitted.choices.to_dict()
-        if "beam_limits" in choices:
-            fields = choices["beam_limits"]
-            if not isinstance(fields, dict) or fields.keys() != {
-                "device_type",
-                "max_decode_rows",
-                "retain_candidate_widths",
-                "constraint_backend",
-                "runner_generation",
-                "local_kv_heads",
-                "head_size",
-            }:
-                raise ValueError("Invalid Beam admission limits")
-            limits = BeamLimits(**fields)
-            try:
-                object.__setattr__(config, "_gr_beam_limits", (wire, limits))
-            except (AttributeError, TypeError):
-                pass
-            return limits
-    # Configs produced before limits were recorded carry only native placement.
+        fields = admitted.choices.to_dict().get("beam_limits")
+        required = {
+            "device_type",
+            "max_decode_rows",
+            "retain_candidate_widths",
+            "constraint_backend",
+            "runner_generation",
+            "local_kv_heads",
+            "head_size",
+        }
+        optional = {"supports_unconstrained", "supports_dynamic_width", "host_policy"}
+        if not isinstance(fields, dict) or not required <= fields.keys() <= required | optional:
+            raise ValueError("Invalid Beam admission limits")
+        if required == fields.keys():
+            # The original v3 wire only supported these two in-tree integrations.
+            # An external adapter may reuse their backend_id, so verify the origin.
+            origin = admitted.versions.to_dict().get("integration")
+            if admitted.backend_id in ("cuda", "ascend") and origin == (
+                f"vllm_gr.platforms.{admitted.backend_id}.integration"
+            ):
+                fields.update(
+                    supports_unconstrained=True,
+                    supports_dynamic_width=True,
+                    host_policy=admitted.backend_id,
+                )
+        limits = BeamLimits(**fields, backend_id=admitted.backend_id)
+        try:
+            object.__setattr__(config, "_gr_beam_limits", (wire, limits))
+        except (AttributeError, TypeError):
+            pass
+        return limits
+    # Before admission a host config may carry only native placement.
     device = getattr(getattr(config, "device_config", None), "device", None)
     placement = str(device).split(":", 1)[0] if device is not None else None
     scheduler = getattr(config, "scheduler_config", None)
@@ -103,7 +130,18 @@ def beam_limits(config: Any) -> BeamLimits:
 
         if GRConfig.from_vllm_config(config).beam_max_decode_steps > 3:
             heads, size = local_kv_geometry(config)
-    return BeamLimits(placement, budget, placement == "npu", backend, generation, heads, size)
+    return BeamLimits(
+        placement,
+        budget,
+        placement == "npu",
+        backend,
+        generation,
+        heads,
+        size,
+        supports_unconstrained=backend is not None,
+        supports_dynamic_width=backend is not None,
+        host_policy={"cuda": "cuda", "npu": "ascend"}.get(placement) if placement else None,
+    )
 
 
 def validate_beam_batch(request: BeamBatchRequest, limits: BeamLimits) -> None:

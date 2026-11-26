@@ -18,7 +18,7 @@ def _get_current_gr_attention_backend() -> GRAttentionBackend | None:
     return GRConfig.from_vllm_config(get_current_vllm_config_or_none()).attention_backend
 
 
-def _register_beam_backend() -> None:
+def _register_beam_backend(path: str = _BEAM_BACKEND_PATH) -> None:
     from vllm.v1.attention.backends.registry import (
         AttentionBackendEnum,
         register_backend,
@@ -28,13 +28,13 @@ def _register_beam_backend() -> None:
     with _REGISTRATION_LOCK:
         if custom.is_overridden():
             owner = custom.get_path()
-            if owner != _BEAM_BACKEND_PATH:
+            if owner != path:
                 raise RuntimeError(
                     f"GR Beam requires CUSTOM attention, already registered to {owner}. "
                     "Load these attention backends in separate processes."
                 )
         else:
-            register_backend(custom, _BEAM_BACKEND_PATH)
+            register_backend(custom, path)
 
 
 def prepare_engine_attention(config: Any) -> None:
@@ -48,7 +48,12 @@ def prepare_engine_attention(config: Any) -> None:
         is not AttentionBackendEnum.CUSTOM
     ):
         raise ValueError("GR CUSTOM attention must be selected before native attention selection")
-    _register_beam_backend()
+    from vllm_gr.platforms.table import current_gr_platform
+
+    platform = current_gr_platform()
+    if platform.beam_attention_backend is None:
+        raise ValueError(f"GR platform {platform.backend_id!r} does not support CUSTOM attention")
+    _register_beam_backend(platform.beam_attention_backend)
     apply_custom_attention_backend_patch()
 
 
@@ -62,11 +67,11 @@ def apply_custom_attention_backend_patch(force: bool = False) -> int:
     """Install the bridge on the selected vendor platform when needed."""
     from vllm.platforms import current_platform
 
-    from vllm_gr.platforms.identity import platform_identity
+    from vllm_gr.platforms.errors import UnsupportedBackendError
+    from vllm_gr.platforms.table import current_gr_platform
 
-    del force
-    if not platform_identity(current_platform).has_lineage("vllm_ascend.platform.NPUPlatform"):
+    try:
+        platform = current_gr_platform()
+    except UnsupportedBackendError:
         return 0
-    from vllm_gr.platforms.ascend.attention_bridge import install
-
-    return install(type(current_platform))
+    return platform.install_attention_selector(type(current_platform))

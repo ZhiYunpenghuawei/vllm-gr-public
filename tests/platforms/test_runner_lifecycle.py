@@ -12,9 +12,8 @@ import pytest
 from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import BackendPlan, BackendRequest, PlanData
 from vllm_gr.config.resolved_choices import ResolvedChoices
-from vllm_gr.platforms import loader
+from vllm_gr.platforms import table
 from vllm_gr.platforms.planning import admit_backend_plan
-from vllm_gr.platforms.services import LegacyPlanningProvider
 from vllm_gr.v1.engine.worker_readiness import worker_backend_readiness
 from vllm_gr.v1.worker import runner_binding as binding
 from vllm_gr.v1.worker.runner_binding import (
@@ -35,7 +34,7 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 def _plan(implementation: str) -> BackendPlan:
     empty = PlanData({})
     request = BackendRequest(empty, empty, empty, empty)
-    return BackendPlan("test", 2, request, PlanData({"runner": implementation}))
+    return BackendPlan("test", request, PlanData({"runner": implementation}))
 
 
 @pytest.mark.parametrize("prepare", ["_prepare_inputs", "prepare_inputs"])  # type: ignore[misc]
@@ -110,47 +109,19 @@ def test_native_calls_use_the_owning_adapter_and_keep_late_completion(prepare: s
         bind_native_runner(_plan("other"), first)
 
 
-def test_legacy_provider_delegates_to_the_same_installed_module() -> None:
-    class Runner:
-        def prepare_inputs(self) -> int:
-            return 0
-
-        def execute_model(self) -> None:
-            raise RuntimeError("native execution failed")
-
-    module = ModuleType("example.runner")
-    install_runner_lifecycle(Runner, module.__name__, prepare="prepare_inputs")
-    provider = SimpleNamespace(
-        backend_id="test", api_version=2, get_model_runner_hooks=lambda: module
-    )
-    legacy = LegacyPlanningProvider(provider)
-    runner, plan = Runner(), _plan("legacy-provider-hooks")
-    adapter = legacy.create_model_runner_adapter(plan=plan, native_runner=runner)
-    setattr(runner, "_gr_backend_binding", BackendBinding(plan, adapter, None, None))
-    assert runner.prepare_inputs() == 0
-    with pytest.raises(RuntimeError, match="native execution failed"):
-        runner.execute_model()
-    provider.get_model_runner_hooks = lambda: ModuleType("other.runner")
-    with pytest.raises(RuntimeError, match="differ from the installed"):
-        legacy.create_model_runner_adapter(plan=plan, native_runner=runner)
-
-
 def test_full_load_rebinds_the_same_plan_only_once_per_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = Mock(
+    implementation = Mock(
         backend_id="test",
-        api_version=2,
-        plan_api_version=3,
-        adapter_revision="1",
         vendor_distribution=None,
     )
-    provider.resolve.side_effect = lambda request: BackendPlan(
-        "test", 2, request, PlanData({"runner": "native"})
+    implementation.resolve.side_effect = lambda request: BackendPlan(
+        "test", request, PlanData({"runner": "native"})
     )
     old, new = Mock(implementation_id="native"), Mock(implementation_id="native")
-    provider.create_model_runner_adapter.side_effect = [old, new]
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: provider)
+    implementation.create_model_runner_adapter.side_effect = [old, new]
+    monkeypatch.setattr(table, "current_gr_platform", lambda: implementation)
     config = SimpleNamespace(additional_config={})
     GRConfig(beam_max_width=16).write_to_vllm_config(config)
     plan = admit_backend_plan(config)
@@ -172,7 +143,7 @@ def test_full_load_rebinds_the_same_plan_only_once_per_model(
         assert binding.bind_backend_services(runner) is runner._gr_backend_binding
         adapter.close.assert_not_called()
     old.close.assert_called_once_with()
-    assert provider.create_model_runner_adapter.call_count == 2
+    assert implementation.create_model_runner_adapter.call_count == 2
 
 
 @pytest.fixture  # type: ignore[misc]
@@ -180,16 +151,12 @@ def autofit_runner(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, BackendPl
     cleanup_module = ModuleType("vllm_gr.v1.worker.model_runner_patch")
     setattr(cleanup_module, "close_constraint_backend", Mock())
     monkeypatch.setitem(sys.modules, cleanup_module.__name__, cleanup_module)
-    provider = Mock(
+    implementation = Mock(
         backend_id="test",
-        api_version=2,
-        plan_api_version=3,
-        adapter_revision="1",
         vendor_distribution=None,
     )
-    provider.resolve.side_effect = lambda request: BackendPlan(
+    implementation.resolve.side_effect = lambda request: BackendPlan(
         "test",
-        2,
         request,
         PlanData(
             {
@@ -198,22 +165,22 @@ def autofit_runner(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, BackendPl
             }
         ),
     )
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: provider)
+    monkeypatch.setattr(table, "current_gr_platform", lambda: implementation)
     config = SimpleNamespace(
         additional_config={}, model_config=SimpleNamespace(max_model_len=4096, dtype="bfloat16")
     )
     GRConfig(beam_max_width=16).write_to_vllm_config(config)
     plan = admit_backend_plan(config)
     assert plan is not None
-    return SimpleNamespace(vllm_config=config), provider, plan
+    return SimpleNamespace(vllm_config=config), implementation, plan
 
 
 def test_first_load_binds_admitted_plan_after_native_autofit(
     autofit_runner: tuple[Any, Any, BackendPlan],
 ) -> None:
-    runner, provider, plan = autofit_runner
+    runner, implementation, plan = autofit_runner
     adapter = Mock(implementation_id="native")
-    provider.create_model_runner_adapter.return_value = adapter
+    implementation.create_model_runner_adapter.return_value = adapter
 
     def load_weights(self: Any, model: object) -> object:
         assert getattr(self, "_gr_backend_binding", None) is None
@@ -222,7 +189,7 @@ def test_first_load_binds_admitted_plan_after_native_autofit(
         return model
 
     observed_lengths = []
-    provider.validate_worker.side_effect = lambda **kwargs: observed_lengths.append(
+    implementation.validate_worker.side_effect = lambda **kwargs: observed_lengths.append(
         kwargs["native_runner"].vllm_config.model_config.max_model_len
     )
     model = object()
@@ -235,7 +202,9 @@ def test_first_load_binds_admitted_plan_after_native_autofit(
         == ResolvedChoices.from_plan(plan).to_wire()
     )
     assert observed_lengths == [2048]
-    provider.create_model_runner_adapter.assert_called_once_with(plan=plan, native_runner=runner)
+    implementation.create_model_runner_adapter.assert_called_once_with(
+        plan=plan, native_runner=runner
+    )
     assert worker_backend_readiness(SimpleNamespace(model_runner=runner))["fingerprint"] == (
         plan.fingerprint
     )
@@ -244,9 +213,9 @@ def test_first_load_binds_admitted_plan_after_native_autofit(
 def test_full_reload_rebinds_admitted_plan_after_native_autofit(
     autofit_runner: tuple[Any, Any, BackendPlan],
 ) -> None:
-    runner, provider, plan = autofit_runner
+    runner, implementation, plan = autofit_runner
     old, new = Mock(implementation_id="native"), Mock(implementation_id="native")
-    provider.create_model_runner_adapter.side_effect = [old, new]
+    implementation.create_model_runner_adapter.side_effect = [old, new]
 
     def load_weights(self: Any, model: object) -> object:
         assert getattr(self, "_gr_backend_binding", None) is None
@@ -272,9 +241,11 @@ def test_full_reload_rebinds_admitted_plan_after_native_autofit(
         runner.vllm_config.additional_config["vllm_gr_choices"]
         == ResolvedChoices.from_plan(plan).to_wire()
     )
-    assert provider.create_model_runner_adapter.call_count == 2
-    assert provider.validate_worker.call_count == 2
-    assert all(call.kwargs["plan"] == plan for call in provider.validate_worker.call_args_list)
+    assert implementation.create_model_runner_adapter.call_count == 2
+    assert implementation.validate_worker.call_count == 2
+    assert all(
+        call.kwargs["plan"] == plan for call in implementation.validate_worker.call_args_list
+    )
     old.close.assert_called_once_with()
     new.close.assert_not_called()
     assert worker_backend_readiness(SimpleNamespace(model_runner=runner))["fingerprint"] == (
@@ -283,12 +254,13 @@ def test_full_reload_rebinds_admitted_plan_after_native_autofit(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "drift", ["length-increase", "length-zero", "length-bool", "dtype", "beam", "runner", "adapter"]
+    "drift",
+    ["length-increase", "length-zero", "length-bool", "dtype", "beam", "runner", "integration"],
 )
 def test_autofit_does_not_hide_worker_plan_drift(
-    autofit_runner: tuple[Any, Any, BackendPlan], drift: str
+    autofit_runner: tuple[Any, Any, BackendPlan], drift: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runner, provider, _ = autofit_runner
+    runner, implementation, _ = autofit_runner
 
     def load_weights(self: Any) -> None:
         self.vllm_config.model_config.max_model_len = 2048
@@ -305,12 +277,17 @@ def test_autofit_does_not_hide_worker_plan_drift(
         elif drift == "runner":
             self.vllm_config.use_v2_model_runner = True
         else:
-            provider.adapter_revision = "2"
+
+            class OtherPlatform(Mock):
+                pass
+
+            other = OtherPlatform(backend_id=implementation.backend_id, vendor_distribution=None)
+            monkeypatch.setattr(table, "current_gr_platform", lambda: other)
 
     with pytest.raises(RuntimeError, match="Worker backend plan mismatch"):
         bind_after_model_load(load_weights)(runner)
-    provider.validate_worker.assert_not_called()
-    provider.create_model_runner_adapter.assert_not_called()
+    implementation.validate_worker.assert_not_called()
+    implementation.create_model_runner_adapter.assert_not_called()
     assert getattr(runner, "_gr_backend_binding", None) is None
 
 
@@ -397,6 +374,7 @@ def test_first_load_cleans_partial_resources_before_a_binding_exists(
 def test_stage_dispatch_uses_the_admitted_runner_generation(
     monkeypatch: pytest.MonkeyPatch, failure: bool
 ) -> None:
+    import vllm.platforms
     from vllm.v1.core.sched.output import SchedulerOutput
 
     from vllm_gr.v1.beam.dispatch import GR_RETIRE_OUTPUT_ATTR, GR_STAGE_OUTPUT_ATTR
@@ -412,7 +390,7 @@ def test_stage_dispatch_uses_the_admitted_runner_generation(
         def device(self) -> str:
             if getattr(self, "_gr_backend_binding", None) is not None:
                 raise AssertionError("bound dispatch inspected device")
-            return "test"
+            return "fakeaccel"
 
         @make_patched_execute_model  # type: ignore[misc]
         def execute_model(self, scheduled: Any) -> Any:
@@ -424,23 +402,29 @@ def test_stage_dispatch_uses_the_admitted_runner_generation(
         def prepare_inputs(self) -> None:
             pass
 
-    provider = Mock(
-        backend_id="test",
-        api_version=2,
-        plan_api_version=3,
-        adapter_revision="1",
-        vendor_distribution=None,
+    from tests.helpers.beam_requests import make_batch_request, make_multi_batch_request
+    from tests.helpers.native_platform import native_platform
+    from vllm_gr.platforms.beam_requests import (
+        decode_batch_capacity,
+        validate_decode_token_budget,
+        validate_gr_device_config,
     )
-    provider.resolve.side_effect = lambda request: BackendPlan(
-        "test", 2, request, PlanData({"runner": "test.runner", "stage": "test.stage"})
+
+    platform = native_platform("OOT", "fakeaccel")
+    monkeypatch.setitem(
+        table.BUILTIN_PROBES, "fakeaccel", lambda: "tests.platforms.fake_accel.FakeGRPlatform"
     )
-    provider.create_model_runner_adapter.side_effect = (
-        lambda plan, native_runner: bind_native_runner(plan, native_runner)
-    )
-    monkeypatch.setattr(loader, "activate_current_backend", lambda: provider)
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
     config = SimpleNamespace(additional_config={})
     GRConfig(beam_max_width=16).write_to_vllm_config(config)
-    admit_backend_plan(config)
+    plan = admit_backend_plan(config)
+    assert plan is not None and plan.backend_id == "fakeaccel"
+    request = make_batch_request()
+    validate_gr_device_config(config, request)
+    validate_decode_token_budget(request, config)
+    assert decode_batch_capacity(config, beam_width=4) == 1
+    with pytest.raises(ValueError, match="FAKEACCEL Beam Decode requires 8 physical tokens"):
+        validate_decode_token_budget(make_multi_batch_request(), config)
     install_runner_lifecycle(Runner, "test.runner", prepare="prepare_inputs", stage=stage)
     runner: Any = Runner()
     runner.vllm_config = config

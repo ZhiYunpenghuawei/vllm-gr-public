@@ -42,7 +42,11 @@ def _resolve_constraint_backend(config: GRConfig) -> GRConfig:
         return config
     from vllm.platforms import current_platform
 
-    return resolve_constraint_backend(config, current_platform.device_type)
+    from vllm_gr.platforms.config import current_constraint_backend
+
+    return resolve_constraint_backend(
+        config, current_constraint_backend(current_platform.device_type)
+    )
 
 
 def _beam_worker_decision_default(
@@ -90,8 +94,10 @@ def create_engine_config(self, usage_context=None, headless=False):
                 "the effective candidate width. Alternatively, use GRLLM or vllm serve --gr."
             )
         effective_gr_config = load_gr_config()
-    config = origin_create_engine_config(native_args, usage_context, headless)
     service = engine_config_service()
+    if getattr(native_args, "worker_cls", None) == "auto" and service.worker_cls is not None:
+        native_args.worker_cls = service.worker_cls
+    config = origin_create_engine_config(native_args, usage_context, headless)
     service.apply_native_defaults(config)
     attention = getattr(config, "attention_config", None)
     backend = getattr(attention, "backend", None)

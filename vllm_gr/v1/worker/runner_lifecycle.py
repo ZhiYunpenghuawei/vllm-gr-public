@@ -103,12 +103,8 @@ def has_runner_lifecycle(runner_class: Any, implementation_id: str) -> bool:
     )
 
 
-def bind_native_runner(
-    plan: BackendPlan, runner: Any, *, implementation_id: str | None = None
-) -> NativeRunnerAdapter:
-    expected = (
-        implementation_id if implementation_id is not None else plan.choices.to_dict()["runner"]
-    )
+def bind_native_runner(plan: BackendPlan, runner: Any) -> NativeRunnerAdapter:
+    expected = plan.choices.to_dict()["runner"]
     if getattr(type(runner), "_gr_runner_implementation_id", None) != expected:
         raise RuntimeError("Worker native runner differs from the admitted backend plan")
     bound = {}

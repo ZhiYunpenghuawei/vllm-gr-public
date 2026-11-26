@@ -64,11 +64,6 @@ def install() -> None:
             plan = read_resolved_choices(worker.vllm_config)
             if plan is not None:
                 admitted = plan.choices.to_dict().get("runner")
-                if admitted == "legacy-provider-hooks":
-                    # API-v1 adapters delegate to this installer without a
-                    # runner implementation ID. The normalized request still
-                    # records the generation selected by the engine.
-                    admitted = runner_id(plan.limits.to_dict()["use_v2_model_runner"])
                 if admitted != selected:
                     raise RuntimeError(
                         "CUDA Worker generation differs from the admitted backend plan"

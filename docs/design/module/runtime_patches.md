@@ -8,26 +8,26 @@ Three files describe the same patch set:
 | [Runtime patch inventory](../runtime_patch_inventory.md) | Checked index: active IDs in contract-test order, scope, backend ownership, owner, installer and risk. |
 | This page | Rationale: the behavior each hook protects and the upstream assumption it depends on. |
 
-Backend ownership identifies which provider declares the patch. Installation
+Backend ownership identifies the in-tree platform integration responsible for the patch. Installation
 can still happen later in a worker or during native configuration.
 
 ## GR-PATCH-000 — Runtime Plugin Activation
 
 Scope: `core`; backend ID: `null`
 
-The general plugin sets ModelRunner defaults, activates the current provider,
-and validates its environment before passing that provider into patch
-installation. The frontend and EngineCore use their own ordered plans. Each
+The general plugin reads vLLM's native platform identity and loads the
+matching in-tree integration. It sets ModelRunner defaults and checks runtime
+compatibility before installing platform and shared patches. The frontend and EngineCore use their own ordered plans. Each
 patch module verifies its bindings so repeated initialization can reuse an
 existing wrapper.
 
-## GR-PATCH-001 — CUSTOM Attention Selector Compatibility
+## GR-PATCH-001 — Ascend CUSTOM Attention Selection
 
-Scope: `core`; backend ID: `null`
+Scope: `backend`; backend ID: `ascend`
 
-An explicit CUSTOM choice, including one restored from serialized GR
-configuration, must reach the registered Beam backend. Changes to the private
-attention selector or its cache can silently select a different backend.
+The Ascend bridge directs an explicit CUSTOM choice to vLLM's registered
+backend and delegates other selections to the native platform method. Its
+removal depends on vllm-ascend honoring the explicit backend selection.
 
 ## GR-PATCH-002 — NPUWorker Initialization Hook
 
@@ -135,9 +135,9 @@ weights, biases and proxies.
 
 Scope: `core`; backend ID: `null`
 
-GR registers Beam attention in the upstream CUSTOM slot. Registration and the
-selector have separate responsibilities. Another extension claiming that slot
-can invalidate the selection.
+A GR engine selecting Beam attention claims the upstream CUSTOM slot before
+model load. Repeated registration accepts the existing GR handler. Startup
+reports a conflict if another extension owns that slot.
 
 ## GR-PATCH-015 — Sliced Vocabulary Projection
 
@@ -153,7 +153,7 @@ native weight reload.
 Scope: `backend`; backend ID: `ascend`
 
 Ascend subprocesses must use a compatible start method when the parent has
-initialized the device. The Ascend provider installs spawn protection before
+initialized the device. The Ascend integration installs spawn protection before
 the native worker initialization hook.
 
 ## GR-PATCH-018 — Ascend Penalties Warmup OOM Guard

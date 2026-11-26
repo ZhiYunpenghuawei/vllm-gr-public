@@ -12,7 +12,11 @@ from unittest import mock
 
 import pytest
 
-from tests.helpers.gr_config import engine_args_from_file, table_constraint
+from tests.helpers.gr_config import (
+    engine_args_from_file,
+    platform_config_service,
+    table_constraint,
+)
 from vllm_gr.config import (
     MAX_BEAM_WIDTH,
     ConstraintMode,
@@ -22,7 +26,6 @@ from vllm_gr.config import (
     gr_config_to_mapping,
     resolve_candidate_width,
 )
-from vllm_gr.platforms.legacy import legacy_config_service
 
 ATTENTION_BACKEND_KEY = "vllm_gr_attention_backend"
 CATALOG_PATH_KEY = "vllm_gr_catalog_path"
@@ -301,7 +304,7 @@ def test_npu_beam_without_catalog_stays_unconstrained(tmp_path: Path) -> None:
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=legacy_config_service("npu"),
+            return_value=platform_config_service("npu"),
         ),
     ):
         result = create_engine_config(
@@ -328,7 +331,7 @@ def test_cuda_beam_enables_worker_decision_by_default(tmp_path: Path) -> None:
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=legacy_config_service("cuda"),
+            return_value=platform_config_service("cuda"),
         ),
     ):
         result = create_engine_config(engine_args)
@@ -358,7 +361,7 @@ def test_engine_config_preserves_explicit_decision_controls(
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=legacy_config_service(platform),
+            return_value=platform_config_service(platform),
         ),
     ):
         result = GRConfig.from_vllm_config(create_engine_config(engine_args))

@@ -84,10 +84,12 @@ worker preserves candidate ancestry across reordering. The
 ## Platform execution
 
 Both backends use the same Beam batch and result contracts. At startup, each
-process activates the provider for the current vLLM device type. The provider
-checks the runtime and applies platform-specific patches. The worker and
-attention dispatchers then select the runner and attention implementation for
-the device.
+process reads vLLM's `current_platform` and loads the matching CUDA or
+Ascend integration from the GR platform table. The integration checks the
+runtime and installs its hooks. Engine configuration records the selected
+runner and Beam limits. After model load, each Worker binds its stage and
+attention operations to that runner. The shared Worker dispatch invokes
+the bound stage or retirement operation.
 
 - **CUDA** workers manage device Beam state and can replay captured Prefill
   and Decode work. The [CUDA Prefill design](feature/cuda_prefill_graph.md)
@@ -98,6 +100,6 @@ the device.
   The [Ascend Decode design](feature/npu_decode_execution.md) describes the
   fused and cascade paths and their fallback conditions.
 
-See the [platform backend contract](module/platform_backend.md) for provider
-ownership and [feature compatibility](../user_guide/feature_compatibility.md)
+See the [platform backend contract](module/platform_backend.md) for platform
+selection and binding and [feature compatibility](../user_guide/feature_compatibility.md)
 for the supported combinations.

@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Provider-owned configuration and engine admission on the host."""
+"""Platform-specific configuration and engine admission on the host."""
 
 from __future__ import annotations
 
-from inspect import signature
 from typing import TYPE_CHECKING, Any
 
-from .errors import BackendNotActiveError, UnsupportedBackendError
-from .interface import ConfigProvider
-from .registry import get_active_backend
+from .errors import UnsupportedBackendError
 
 if TYPE_CHECKING:
     from vllm_gr.config import GRConfig
 
 
 class BackendConfigService:
-    """Optional v2 policy. An engine plan supplies the hardware implementation."""
+    """Host-side configuration policy for a GR engine."""
 
+    # Passed to native EngineArgs only when the user leaves --worker-cls on auto.
+    worker_cls: str | None = None
     default_worker_decision = False
     supports_constraint_vocab_slicing = False
 
@@ -31,41 +30,25 @@ class BackendConfigService:
         pass
 
 
-def validate_config_factory(provider: Any) -> None:
-    factory = getattr(provider, "create_config_service", None)
-    if factory is None:
-        return
-    if not callable(factory):
-        raise ValueError("Backend provider create_config_service must be callable")
-    try:
-        parameters = signature(factory)
-    except (ValueError, TypeError):
-        return  # Some native extension callables do not publish a signature.
-    try:
-        parameters.bind()
-    except TypeError as exc:
-        raise ValueError(f"Invalid backend factory create_config_service signature: {exc}") from exc
-
-
-def provider_config_service(provider: Any) -> BackendConfigService:
-    if isinstance(provider, ConfigProvider) and callable(provider.create_config_service):
-        return provider.create_config_service()
-    return BackendConfigService()
-
-
 def engine_config_service() -> BackendConfigService:
-    """Resolve defaults before EngineArgs constructs the plan."""
-    from .loader import activate_current_backend, requested_backend_id
+    """Apply the selected platform's defaults before admitting the engine."""
+    from .table import current_gr_platform
 
     try:
-        provider = get_active_backend()
-    except BackendNotActiveError:
-        try:
-            provider = activate_current_backend()
-        except UnsupportedBackendError:
-            # Ordinary native EngineArgs can also run with GR disabled. Enabled
-            # engines still require a matching provider during plan admission.
-            if requested_backend_id() is not None:
-                raise
-            return BackendConfigService()
-    return provider_config_service(provider)
+        integration = current_gr_platform()
+    except UnsupportedBackendError:
+        # Native EngineArgs can run with GR disabled on other platforms.
+        # An enabled GR engine must resolve its integration at plan admission.
+        return BackendConfigService()
+    return integration.create_config_service()
+
+
+def current_constraint_backend(fallback: str) -> str:
+    """Choose the canonical table implementation declared by the selected GR platform."""
+    from .table import current_gr_platform
+
+    try:
+        platform = current_gr_platform()
+    except UnsupportedBackendError:
+        return fallback
+    return platform.canonical_constraint_backend

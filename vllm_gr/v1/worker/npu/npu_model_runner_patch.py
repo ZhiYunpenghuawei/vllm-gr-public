@@ -22,10 +22,10 @@ from vllm_gr.config.models import (
     configured_constraint_mode,
     deployment_for,
 )
+from vllm_gr.platforms.ascend.decode import create_beam_context
 from vllm_gr.v1.worker.gr_context import (
     _beam_full_graph_ready,
     _beam_graph_enabled_for_run,
-    _create_beam_context,
 )
 from vllm_gr.v1.worker.model_runner_contracts import (
     _WORKER_DETERMINE_PATCH_MARKER,
@@ -219,18 +219,12 @@ def make_patched_sample_tokens_npu(_orig_sample_tokens):
     return patched_sample_tokens
 
 
-def _npu_xllm_decode_mode_active() -> bool:
-    """True iff the NPU decode execution mode resolves to the fused xllm path.
-
-    Only the xllm fused path is graph-safe: the cascade NPU path slices the
-    beam pool with host-int decode_step values (beam_attn_npu.py), which a
-    captured graph would freeze.  Resolved lazily through the same
-    per-process cache the attention backend uses (``_get_npu_decode_execution``).
-    """
+def _npu_xllm_decode_mode_active(runner: Any) -> bool:
+    """The fused xllm path reads dynamic decode steps during graph replay."""
     try:
-        from vllm_gr.v1.attention.backends.beam_attn import _get_npu_decode_execution
+        from vllm_gr.platforms.ascend.decode import engine_mode
 
-        return _get_npu_decode_execution() == "xllm"
+        return engine_mode(runner.vllm_config) == "xllm"
     except Exception:
         return False
 
@@ -377,7 +371,7 @@ def make_patched_determine_batch_execution_and_padding_npu(_orig_determine):
 
         # Only the fused xllm path is graph-safe on NPU (the cascade path
         # bakes host-int pool slices; see _npu_xllm_decode_mode_active).
-        if not _npu_xllm_decode_mode_active():
+        if not _npu_xllm_decode_mode_active(self):
             return _npu_graph_fallback(self, result, "unsupported_decode_mode")
 
         # Exact-width gate: compare the UNPADDED scheduled token count
@@ -474,7 +468,7 @@ def _capture_create_dummy_context_npu(
         dynamic_beam_widths=(width, width, width) if width != int(gr_cfg.beam_max_width) else None,
     )
     if context is None:
-        context = _create_beam_context(runner, gr_cfg, max_batch=batch_size)
+        context = create_beam_context(runner, gr_cfg, max_batch=batch_size)
         if getattr(gr_cfg, "beam_graph_widths", None) is not None:
             from vllm_gr.v1.beam.dynamic_width import (
                 initialize_packed_stage_pools,
@@ -660,9 +654,7 @@ def _capture_beam_decode_graph_width(runner, width: int) -> bool:
     """
     from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 
-    from vllm_gr.v1.worker.gr_context import (
-        _get_gr_config,
-    )
+    from vllm_gr.v1.worker.gr_context import _get_gr_config
 
     gr_cfg = _get_gr_config(runner)
     if not gr_cfg.beam_graph_active:
@@ -671,7 +663,7 @@ def _capture_beam_decode_graph_width(runner, width: int) -> bool:
     # Only the fused xllm execution path is graph-safe on NPU (the cascade
     # path slices the beam pool with host-int decode_step values, which a
     # captured graph would freeze).
-    if not _npu_xllm_decode_mode_active():
+    if not _npu_xllm_decode_mode_active(runner):
         logger.info(
             "vllm-gr: beam decode ACL graph requires the xllm decode execution "
             "mode; Beam FULL graph will not be used"
@@ -852,9 +844,7 @@ def _retained_npu_suffix_kv_bytes(runner: Any) -> int:
 
 def capture_beam_decode_graph(runner: Any) -> bool:
     """Capture configured widths over private graphs and stable suffix banks."""
-    from vllm_gr.v1.worker.gr_context import (
-        _get_gr_config,
-    )
+    from vllm_gr.v1.worker.gr_context import _get_gr_config
 
     config = _get_gr_config(runner)
     if not config.beam_graph_active:
