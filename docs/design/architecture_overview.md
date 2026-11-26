@@ -84,8 +84,9 @@ worker preserves candidate ancestry across reordering. The
 ## Platform execution
 
 Both backends use the same Beam batch and result contracts. At startup, each
-process reads vLLM's `current_platform` and loads the matching CUDA or
-Ascend integration from the GR platform table. The integration checks the
+process reads vLLM's `current_platform`. One matching installed GR plugin takes
+precedence on every device. With no matching plugin, GR requires a unique
+built-in match. The process caches the selected platform, which checks the
 runtime and installs its hooks. Engine configuration records the selected
 runner and Beam limits. After model load, each Worker binds its stage and
 attention operations to that runner. The shared Worker dispatch invokes

@@ -43,5 +43,5 @@ The matrix describes the documented runtime paths and their configuration limits
 ## See also
 
 - [Platform backend contract](../design/module/platform_backend.md) for how GR matches the native
-  vLLM platform to an in-tree integration.
+  vLLM platform to a built-in or independently installed GR implementation.
 - [Supported models](../models/supported_models.md) for the model list.

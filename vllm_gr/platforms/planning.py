@@ -68,6 +68,8 @@ def integration_versions(integration: GRPlatform) -> PlanData:
     """Capture the selected implementation and package versions across ranks."""
     from vllm_gr.version import __version__
 
+    from .discovery import plugin_versions
+
     vendor = integration.vendor_distribution
     return PlanData(
         {
@@ -76,6 +78,7 @@ def integration_versions(integration: GRPlatform) -> PlanData:
             "vendor_distribution": vendor,
             "vendor": installed_version(vendor) if vendor else None,
             "integration": qualified_class_name(type(integration)),
+            **plugin_versions(integration),
         }
     )
 

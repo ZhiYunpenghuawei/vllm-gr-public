@@ -10,7 +10,7 @@ rationale for each hook is in [runtime patches](module/runtime_patches.md).
 
 | Field | Meaning |
 | --- | --- |
-| Scope and backend ID | `core` patches are owned by `vllm_gr`; `backend` patches are declared by one in-tree integration. |
+| Scope and backend ID | `core` patches are owned by `vllm_gr`; `backend` patches are attributed to the shipped platform class that owns each inventoried hook. |
 | Owner and installer | The module that owns the behavior and the callable that installs it. |
 | Risk | `critical` hooks can change upstream control flow or wire values; `high` hooks change scheduling, loading or device setup; `medium` hooks are bounded adapters. |
 | Process roles | Processes that must install or verify the hook. |

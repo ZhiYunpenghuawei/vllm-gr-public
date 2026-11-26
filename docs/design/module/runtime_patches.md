@@ -8,15 +8,14 @@ Three files describe the same patch set:
 | [Runtime patch inventory](../runtime_patch_inventory.md) | Checked index: active IDs in contract-test order, scope, backend ownership, owner, installer and risk. |
 | This page | Rationale: the behavior each hook protects and the upstream assumption it depends on. |
 
-Backend ownership identifies the in-tree platform integration responsible for the patch. Installation
+Backend ownership identifies the shipped platform class responsible for an inventoried patch. Installation
 can still happen later in a worker or during native configuration.
 
 ## GR-PATCH-000 — Runtime Plugin Activation
 
 Scope: `core`; backend ID: `null`
 
-The general plugin reads vLLM's native platform identity and loads the
-matching in-tree integration. It sets ModelRunner defaults and checks runtime
+The general plugin reads vLLM's native platform identity and resolves a GR platform class from installed probes and the built-in table. It sets ModelRunner defaults and checks runtime
 compatibility before installing platform and shared patches. The frontend and EngineCore use their own ordered plans. Each
 patch module verifies its bindings so repeated initialization can reuse an
 existing wrapper.

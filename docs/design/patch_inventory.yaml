@@ -20,10 +20,11 @@ patches:
     backend_id: null
     owner: vllm_gr/plugin.py
     installer: vllm_gr.plugin.register
-    activation: vLLM loads the vllm.general_plugins entry point and the integration matching current_platform passes environment checks
+    activation: vLLM loads the vllm.general_plugins entry point and the GR platform selected by external-first discovery for current_platform passes environment checks
     validator_or_test:
       - tests/patch/test_patch_initialization.py::test_plugin_exposes_simple_per_patch_status
       - tests/platforms/test_runtime_wiring.py
+      - tests/platforms/test_platform_plugins.py
       - tests/platforms/test_import_isolation.py::test_cuda_plugin_initialization_does_not_import_ascend
     process_roles: [main, engine_core, worker]
     target: vllm_gr.plugin.register
