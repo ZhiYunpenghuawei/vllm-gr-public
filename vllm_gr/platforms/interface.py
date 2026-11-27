@@ -130,6 +130,12 @@ class GRPlatform(Platform, ABC):
     backend_id: str
     default_use_v2_model_runner: bool | None = None
     beam_attention_backend: str | None = None
+    # Native CUSTOM-slot claims that this platform's attention bridge
+    # supersedes when a GR engine claims the slot for the beam backend.
+    # vllm-ascend registers "ASCEND" at import time; the Ascend bridge
+    # resolves Beam selection through the registry, so the beam backend must
+    # overwrite that claim instead of rejecting it. Unknown owners still fail.
+    bridged_custom_attention_owners: tuple[str, ...] = ()
     vendor_distribution: str | None = None
     patch_ids: tuple[str, ...] = ()
 
