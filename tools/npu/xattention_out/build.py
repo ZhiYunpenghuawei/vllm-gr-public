@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import subprocess
@@ -30,14 +31,19 @@ def sha256(path: Path) -> str:
 
 
 def runtime_versions() -> dict[str, str]:
+    owned = os.environ.get("VLLM_GR_OWNED_NPU") == "1"
+    exact_versions = {
+        name: expected
+        for name, expected in RUNTIME_EXACT_VERSIONS.items()
+        if not (owned and name == "vllm-ascend")
+    }
     versions = {
-        name: importlib.metadata.version(name)
-        for name in (*RUNTIME_BASE_VERSIONS, *RUNTIME_EXACT_VERSIONS)
+        name: importlib.metadata.version(name) for name in (*RUNTIME_BASE_VERSIONS, *exact_versions)
     }
     for name, expected in RUNTIME_BASE_VERSIONS.items():
         if versions[name].split("+", 1)[0] != expected:
             raise ValueError(f"Unsupported {name}: {versions[name]}; expected {expected}")
-    for name, expected in RUNTIME_EXACT_VERSIONS.items():
+    for name, expected in exact_versions.items():
         if versions[name] != expected:
             raise ValueError(f"Unsupported {name}: {versions[name]}; expected {expected}")
     return versions
@@ -68,6 +74,7 @@ def main() -> None:
         "output_dir": str(output),
         "installs_packages": False,
         "kernel_rebuilt": False,
+        "runtime_mode": "owned" if os.environ.get("VLLM_GR_OWNED_NPU") == "1" else "legacy",
         "command": [
             sys.executable,
             str(here / "setup.py"),
@@ -85,6 +92,21 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=False)
     try:
         report["runtime"] = runtime_versions()
+        if report["runtime_mode"] == "owned":
+            # A receipt for an owned build must come from a clean runtime.
+            # Resolve the module spec without importing the old platform plugin.
+            try:
+                importlib.metadata.version("vllm-ascend")
+            except importlib.metadata.PackageNotFoundError:
+                pass
+            else:
+                raise ValueError(
+                    "Owned XAttention builds require an environment without vLLM-Ascend"
+                )
+            if importlib.util.find_spec("vllm_ascend") is not None:
+                raise ValueError(
+                    "vllm_ascend is importable in the owned XAttention build environment"
+                )
         report["python_abi"] = list(sys.version_info[:2])
         report["build_sources"] = {
             name: sha256(here / name) for name in ("build.py", "setup.py", "xattention_out.cpp")

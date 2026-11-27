@@ -248,7 +248,7 @@ patches:
   - id: GR-PATCH-012
     scope: backend
     backend_id: ascend
-    owner: vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py, vllm_gr/v1/worker/npu/v2/runner_installer.py
+    owner: vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py, vllm_gr/v1/worker/npu/v2/runner_installer.py, vllm_gr/v1/worker/npu/sid_stage_setup.py
     shared_helpers: vllm_gr/v1/worker/model_runner_common.py, vllm_gr/v1/worker/npu/npu_model_runner_inputs.py, vllm_gr/v1/worker/model_runner_contracts.py, vllm_gr/v1/worker/gr_gc.py, vllm_gr/v1/worker/gr_context.py, vllm_gr/v1/worker/gr_execution.py, vllm_gr/v1/worker/hot_update.py, vllm_gr/constraints/versioned_table.py, vllm_gr/ops/npu/stage_projection.py, vllm_gr/v1/worker/npu/startup_patch.py
     installer: vllm_gr.v1.worker.model_runner_patch.apply_worker_patches
     activation: the legacy Ascend provider discovers NPUModelRunner and binds its planned lifecycle after model load; the delayed NPUWorker.init_device wrapper mounts common Worker utilities before native initialization. The owned provider installs the V2-specific execute/sample and binding hooks on its own runner and Worker. Online Trie reload remains rejected by Core on NPU.

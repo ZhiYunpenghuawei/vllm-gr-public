@@ -71,7 +71,7 @@ def install() -> None:
         install_worker_utility_hooks,
         make_load_model_with_constraint_backend,
     )
-    from vllm_gr.v1.worker.npu.npu_model_runner_patch import (
+    from vllm_gr.v1.worker.npu.sid_stage_setup import (
         make_patched_load_model,
     )
     from vllm_gr.v1.worker.npu.owned_worker import NPUWorker

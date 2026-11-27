@@ -15,7 +15,10 @@ full output vocabulary. The example uses the Beam API with no catalog artifact.
 
 Prepare the vendor runtime and Beam attention dependencies in the
 [Ascend installation guide](../getting_started/installation/npu.md). Beam
-search on Ascend uses [ModelRunner V1](../configuration/README.md#modelrunner-selection).
+search on the qualified legacy Ascend runtime uses
+[ModelRunner V1](../configuration/README.md#modelrunner-selection).
+The separate [owned V2 candidate](../getting_started/installation/npu.md#experimental-owned-modelrunner-v2)
+requires its own qualification; the example below remains the legacy path.
 The full-vocabulary selector uses PyTorch and reuses the Beam attention and
 KV operators from that setup.
 
@@ -264,6 +267,9 @@ python -c 'import torch_npu, custom_ops_lib, vllm_gr_xattention_out_ext as m; pr
 Keep the receipt next to the binary and the output directory on `PYTHONPATH`
 for spawned workers. Restart the engine after changing the extension. To use
 the allocating route, start the engine without that directory on `PYTHONPATH`.
+For the experimental owned runtime, set `VLLM_GR_OWNED_NPU=1` before planning,
+building and loading the addon in its clean environment. Build receipts bind
+the runtime mode and package versions; a legacy addon is not an owned addon.
 
 Validate against the installed allocating kernel in the prepared environment:
 

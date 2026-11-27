@@ -210,18 +210,9 @@ class OwnedNPUBackendProvider(NPUBackendProvider):
         return OwnedNPUConfigService()
 
     def check_environment(self) -> dict[str, str]:
-        from importlib.util import find_spec
-        from ..compat import check_vllm_runtime, installed_version
+        from .environment import check_ascend_environment
 
-        report = check_vllm_runtime()
-        if installed_version("vllm-ascend") is not None or find_spec("vllm_ascend") is not None:
-            raise RuntimeError("Owned NPU runtime requires an environment without vLLM-Ascend")
-        version = installed_version("torch-npu")
-        if version is None:
-            raise RuntimeError("Owned NPU runtime requires torch-npu")
-        report["torch-npu"] = version
-        report["platform"] = "npu"
-        return report
+        return check_ascend_environment(require_npu_platform=True)
 
     def apply_runtime_patches(self, *, force: bool = False) -> int:
         del force

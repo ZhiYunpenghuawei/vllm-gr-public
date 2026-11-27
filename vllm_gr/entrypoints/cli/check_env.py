@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -21,7 +22,9 @@ class CheckEnvSubcommand(CLISubcommand):
         from vllm_gr.platforms.compat import check_vllm_runtime
 
         detected_device = str(current_platform.device_type)
-        require_npu = bool(args.npu or detected_device == "npu")
+        require_npu = bool(
+            args.npu or detected_device == "npu" or os.environ.get("VLLM_GR_OWNED_NPU") == "1"
+        )
         if require_npu:
             from vllm_gr.platforms.ascend.environment import check_ascend_environment
 
@@ -42,7 +45,7 @@ class CheckEnvSubcommand(CLISubcommand):
             self.name,
             help="Validate vLLM-GR runtime dependencies.",
             description=(
-                "Validate vLLM/vLLM-Ascend versions, the selected platform, "
+                "Validate selected vLLM runtime dependencies, the platform, "
                 "and the active Triton-Ascend backend."
             ),
             usage="%(prog)s --gr [--npu]",

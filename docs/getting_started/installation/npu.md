@@ -132,10 +132,57 @@ by `python -m pip show vllm` as the patch target.
 - [Serve OneRec over HTTP](../quickstart.md#online-serving) to check returned SIDs against a catalog.
 - [Beam search on Ascend](../../user_guide/beam_search_npu.md) covers full-vocabulary generation. [Decode execution modes](../../design/feature/npu_decode_execution.md) describes xllm and cascade attention.
 
+## Experimental owned ModelRunner V2
+
+The instructions above remain the qualified legacy runtime. The GR-owned
+NPU platform is an opt-in implementation candidate for independent vLLM
+upgrades. It has not yet passed the NPU device, model, graph, accuracy or
+performance acceptance gates. The existing vendor-image lane continues to
+use its validated vLLM-Ascend package.
+
+For the owned candidate, prepare a **separate** Python environment using
+vLLM 0.30.0, Triton-Ascend 3.6.0, the matching Torch/torch-npu and CANN stack,
+and the xllm-ops build for that stack. Retain the actual environment and
+operator provenance. Do not install vLLM-Ascend, including editable source
+checkouts. An unmodified legacy vendor image is not a clean owned environment.
+No independent wheel/container combination is claimed qualified yet.
+
+Select the independent runtime before importing vLLM, including in spawned
+workers. From the prepared environment and the owned checkout:
+
+```bash
+export VLLM_GR_OWNED_NPU=1
+export VLLM_GR_TARGET_DEVICE=npu
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+python tools/ci/resolve_runtime.py resolve --device npu \
+  --output /tmp/vllm-gr-owned-npu-runtime.json
+python -m pip install -e ".[dev]" --no-build-isolation
+python -m vllm_gr.entrypoints.cli.main check-env --gr --npu
+```
+
+The resolver records the selected mode and inherited package versions in the
+cache identity. The environment check rejects any installed or importable
+vLLM-Ascend package and requires the GR-owned native NPU platform. Successful
+package checks are prerequisites only; they do not execute the model.
+
+Start device validation with a supported dense FP16/BF16 text model,
+CUSTOM attention, an explicit GR Beam configuration, async scheduling,
+unchunked Prefill, and eager execution. Keep all parallel sizes at one and
+leave KV transfer, speculative decoding, LoRA and quantization disabled.
+Set `gr.beam_graph_enabled=false` and `gr.prefill_graph_enabled=false` explicitly;
+the current candidate rejects those public graph modes until device qualification.
+Do not change the V1 example flags alone and interpret its output as V2
+qualification. Run the V2-specific regression and real device acceptance
+workloads before switching any default or expanding the support matrix.
+
 ## Optional XAttention output binding
 
 For direct writes to the caller's attention buffer, follow the
 [optional extension build and verification steps](../../user_guide/beam_search_npu.md#optional-xattention-output-binding).
+Build in the selected runtime mode and use a fresh output directory. Owned
+receipts exclude vLLM-Ascend and cannot be used by legacy mode; old legacy
+receipts are likewise declined by the owned runtime.
 
 ## Dependency checking on Ascend
 

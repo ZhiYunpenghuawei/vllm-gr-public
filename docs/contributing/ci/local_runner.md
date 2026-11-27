@@ -55,6 +55,15 @@ including `rec_constrained_topk`, before and after a build. The runner loads
 the vendor's `bin/set_env.bash` when present. The fallback requires a single
 `set_env.bash` elsewhere in the vendor directory.
 
+For the experimental [owned NPU runtime](../../getting_started/installation/npu.md#experimental-owned-modelrunner-v2),
+resolve the candidate with `VLLM_GR_OWNED_NPU=1` in the separate environment.
+The same flag must be set when verifying its runtime specification, and the
+base and resulting Python inventories must not contain vLLM-Ascend. The
+resolver uses a distinct cache identity for this mode. This enables a focused
+owned-runtime validation lane without weakening the legacy NPU gate. Do not
+treat metadata resolution or host-only tests as device qualification, and do
+not run legacy V1 model tests as evidence of owned V2 inference.
+
 ## Select devices and test levels
 
 On shared machines, pass the IDs allocated to your job. The runner uses

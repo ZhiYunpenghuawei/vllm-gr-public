@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 import sys
 from collections.abc import Callable
 from functools import lru_cache
@@ -51,9 +52,13 @@ def _binding_is_compatible(module: ModuleType) -> bool:
         or receipt["python_abi"] != list(sys.version_info[:2])
     ):
         return False
-    if receipt["runtime"] != {
-        name: importlib.metadata.version(name) for name in _RUNTIME_DISTRIBUTIONS
-    }:
+    owned = os.environ.get("VLLM_GR_OWNED_NPU") == "1"
+    if receipt.get("runtime_mode", "legacy") != ("owned" if owned else "legacy"):
+        return False
+    distributions = tuple(
+        name for name in _RUNTIME_DISTRIBUTIONS if not (owned and name == "vllm-ascend")
+    )
+    if receipt["runtime"] != {name: importlib.metadata.version(name) for name in distributions}:
         return False
     if not _same_file_identity(str(addon_path), receipt["addon"]):
         return False

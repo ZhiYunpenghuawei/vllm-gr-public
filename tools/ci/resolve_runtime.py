@@ -69,8 +69,16 @@ def literal(path: Path, name: str) -> str:
     return value
 
 
-def declarations(repo: Path, device: str) -> dict[str, str]:
-    packages = tuple(GUARDS) if device == "npu" else ("vllm",)
+def declarations(repo: Path, device: str, *, owned_npu: bool = False) -> dict[str, str]:
+    if owned_npu:
+        if (
+            device != "npu"
+            or not (repo / "vllm_gr/platforms/ascend/owned_platform_plugin.py").is_file()
+        ):
+            raise ValueError("The selected checkout does not support the owned NPU runtime")
+        packages = ("vllm", "triton-ascend")
+    else:
+        packages = tuple(GUARDS) if device == "npu" else ("vllm",)
     guard_source = repo / "vllm_gr/platforms/compat.py"
     prefix = ""
     if not (repo / "vllm_gr/platforms/ascend/environment.py").is_file():
@@ -93,8 +101,10 @@ def declarations(repo: Path, device: str) -> dict[str, str]:
         raise ValueError("vLLM guard, CUDA pin, GR base and SCM fallback versions must agree")
     _check_version_fallback(repo, base)
     expected = {"vllm": base, "vllm-gr": package_version(repo, base)}
-    if device == "npu":
+    if device == "npu" and not owned_npu:
         expected.update({key: guards[key] for key in ("vllm-ascend", "triton-ascend")})
+    elif owned_npu:
+        expected["triton-ascend"] = guards["triton-ascend"]
     return expected
 
 
@@ -213,6 +223,8 @@ def source_digest(repo: Path) -> str:
         "vllm_gr/_env_check.py",
         "vllm_gr/platforms/compat.py",
         "vllm_gr/platforms/ascend/environment.py",
+        "vllm_gr/platforms/ascend/owned_platform_plugin.py",
+        "vllm_gr/platforms/ascend/owned_platform.py",
         "vllm_gr/version.py",
         "tools/ci/resolve_runtime.py",
         "tools/packaging/git_version.py",
@@ -283,16 +295,19 @@ def check_versions(expected: dict[str, str], installed: dict[str, str]) -> list[
 
 def resolve(repo: Path, device: str) -> dict[str, Any]:
     device = "cuda" if device == "gpu" else device
+    owned_npu = device == "npu" and os.environ.get("VLLM_GR_OWNED_NPU") == "1"
     spec: dict[str, Any] = {
         "schema": 1,
         "device": device,
-        "expected": declarations(repo, device),
+        "expected": declarations(repo, device, owned_npu=owned_npu),
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
         "os": platform.system(),
         "architecture": platform.machine(),
         "dependency_sha256": source_digest(repo),
     }
+    if owned_npu:
+        spec["owned_npu"] = True
     if device == "npu":
         # Inherited packages are part of the cache identity, not an implicit
         # dependency on whichever vendor image happens to host a later job.
@@ -303,6 +318,8 @@ def resolve(repo: Path, device: str) -> dict[str, Any]:
         errors = check_versions(required, spec["base_packages"])
         if "torch-npu" not in spec["base_packages"]:
             errors.append("the NPU base Python must provide torch-npu")
+        if owned_npu and "vllm-ascend" in spec["base_packages"]:
+            errors.append("the owned NPU base Python must not contain vllm-ascend")
         if errors:
             raise ValueError("NPU runner image is not ready: " + "; ".join(errors))
     spec["cache_key"] = (
@@ -335,6 +352,14 @@ def verify(repo: Path, spec: dict[str, Any], venv: Path) -> dict[str, Any]:
         "errors": [],
     }
     errors: list[str] = report["errors"]
+    owned_npu = spec.get("owned_npu", False)
+    if not isinstance(owned_npu, bool) or (owned_npu and spec["device"] != "npu"):
+        errors.append("invalid owned NPU runtime mode in resolved spec")
+    if spec["device"] == "npu":
+        if owned_npu != (os.environ.get("VLLM_GR_OWNED_NPU") == "1"):
+            errors.append("VLLM_GR_OWNED_NPU differs from the resolved runtime identity")
+        if owned_npu and "vllm-ascend" in installed:
+            errors.append("the owned NPU Python must not contain vllm-ascend")
     revision = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         capture_output=True,
@@ -364,7 +389,7 @@ def verify(repo: Path, spec: dict[str, Any], venv: Path) -> dict[str, Any]:
     prefixes = [venv]
     if spec["device"] == "npu":
         prefixes.append(Path(sys.base_prefix).resolve())
-        modules.extend(["vllm_ascend", "torch_npu"])
+        modules.extend(["torch_npu"] if owned_npu else ["vllm_ascend", "torch_npu"])
     # Fail before importing an unsupported runtime, while still saving versions.
     if not errors:
         for name in modules:
@@ -452,6 +477,10 @@ def main() -> int:
                     "CI_VLLM_REQUIREMENT": f"vllm=={spec['expected']['vllm']}",
                 },
             )
+            if spec["device"] == "npu":
+                append_values(
+                    args.github_env, {"VLLM_GR_OWNED_NPU": "1" if spec.get("owned_npu") else "0"}
+                )
         else:
             if not args.spec or not args.venv:
                 raise ValueError("verify requires --spec and --venv")

@@ -30,6 +30,13 @@ The Triton check imports the module that Python actually resolves. Installing
 the `triton-ascend` distribution is not sufficient on its own: a standard
 `triton` wheel installs the same top-level package and can overwrite it.
 
+For the experimental owned runtime, set `VLLM_GR_OWNED_NPU=1` before
+launching the command in its separate environment. The same vLLM and
+Triton-Ascend pins apply, but the check requires torch-npu and rejects
+installed or importable vLLM-Ascend. The detected platform must be the GR-owned
+NPU class. This mode is not yet device-qualified. See the
+[owned runtime setup](../getting_started/installation/npu.md#experimental-owned-modelrunner-v2).
+
 ## Output and exit status
 
 On success the command prints a header followed by one `name: value` line per

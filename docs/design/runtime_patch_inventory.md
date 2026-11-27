@@ -146,7 +146,7 @@ Risk: `critical`; process roles: `gpu_worker`
 
 Scope: `backend`; backend ID: `ascend`
 
-Owner: `vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py, vllm_gr/v1/worker/npu/v2/runner_installer.py`
+Owner: `vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py, vllm_gr/v1/worker/npu/v2/runner_installer.py, vllm_gr/v1/worker/npu/sid_stage_setup.py`
 
 Installer: `vllm_gr.v1.worker.model_runner_patch.apply_worker_patches`
 

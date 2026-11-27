@@ -33,7 +33,8 @@ def load_source(path: Path, name: str) -> Any:
 
 
 @pytest.fixture
-def binding() -> Any:
+def binding(monkeypatch: Any) -> Any:
+    monkeypatch.delenv("VLLM_GR_OWNED_NPU", raising=False)
     return load_source(ROOT / "vllm_gr/ops/npu/_xattention_out.py", "_binding_contract")
 
 
@@ -276,3 +277,31 @@ def test_existing_build_directory_is_not_modified(tmp_path: Path, monkeypatch: A
         build.main()
     assert marker.read_text() == "keep"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["previous-result"]
+
+
+def test_owned_addon_receipt_excludes_legacy_package(
+    binding: Any, addon: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("VLLM_GR_OWNED_NPU", "1")
+    # A valid legacy artifact cannot qualify the independent backend.
+    assert not binding._binding_is_compatible(addon.module)
+    addon.receipt["runtime_mode"] = "owned"
+    addon.receipt["runtime"].pop("vllm-ascend")
+    addon.receipt_path.write_text(json.dumps(addon.receipt))
+    versions = addon.receipt["runtime"]
+    lookup = Mock(side_effect=versions.__getitem__)
+    monkeypatch.setattr(binding.importlib.metadata, "version", lookup)
+    assert binding._binding_is_compatible(addon.module)
+    assert {call.args[0] for call in lookup.call_args_list} == {"torch", "torch-npu", "vllm"}
+    monkeypatch.delenv("VLLM_GR_OWNED_NPU")
+    assert not binding._binding_is_compatible(addon.module)
+
+
+def test_owned_build_runtime_versions_do_not_require_ascend(monkeypatch: Any) -> None:
+    build = load_source(BUILD, "_out_owned_runtime")
+    monkeypatch.setenv("VLLM_GR_OWNED_NPU", "1")
+    versions = {"torch": "2.10.0", "torch-npu": "2.10.0.post7", "vllm": "0.30.0"}
+    lookup = Mock(side_effect=versions.__getitem__)
+    monkeypatch.setattr(build.importlib.metadata, "version", lookup)
+    assert build.runtime_versions() == versions
+    assert {call.args[0] for call in lookup.call_args_list} == set(versions)

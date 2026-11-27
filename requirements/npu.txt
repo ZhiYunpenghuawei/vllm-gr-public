@@ -1,9 +1,13 @@
-# NPU shared dependencies only. The vendor runtime — vLLM 0.30.0,
+# NPU shared dependencies only. In the default legacy mode the vendor runtime — vLLM 0.30.0,
 # vLLM-Ascend 0.30.0rc2, triton-ascend 3.6.0, torch/torch-npu 2.10, CANN
 # 9.2.0 — is supplied by the base image (validated on
 # quay.io/ascend/vllm-ascend:v0.30.0rc2), and the xllm-ops operator library
 # must be built for that image's CANN version. The Ascend provider checks
 # the pins declared in vllm_gr.platforms.compat at startup.
+# The experimental owned V2 mode (VLLM_GR_OWNED_NPU=1) instead requires a
+# prepared vLLM, torch-npu, Triton-Ascend and CANN environment without
+# vLLM-Ascend. It uses the same shared dependencies and xllm-ops; there is no
+# installation or import requirement for the old platform plugin in that mode.
 -r common.txt
 
 # Match the validated vendor image: triton-ascend 3.6.0 declares numpy==1.26.4
