@@ -61,6 +61,8 @@ class NPUModelRunnerV2:
     """
 
     def __init__(self, vllm_config: Any, device: torch.device) -> None:
+        from vllm_gr.v1.worker.npu.v2.native_contract import active_native_contract
+
         validate_gr_execution_config(vllm_config)
         if device.type != "npu":
             raise ValueError("Owned NPU V2 requires an NPU device")
@@ -74,6 +76,7 @@ class NPUModelRunnerV2:
         self.scheduler_config = vllm_config.scheduler_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
+        self.native_contract = active_native_contract()
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -635,7 +638,7 @@ class NPUModelRunnerV2:
         stages = getattr(scheduler_output, GR_STAGE_OUTPUT_ATTR, None)
         if not stages and scheduler_output.total_num_scheduled_tokens == 0:
             self.consume_native_state(scheduler_output)
-            return ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            return self.native_contract.make_output(ModelRunnerOutput, req_ids=[])
         if not stages or len(stages) != 1:
             raise ValueError("Owned NPU V2 only supports GR Beam sessions")
         stage = next(iter(stages.values()))

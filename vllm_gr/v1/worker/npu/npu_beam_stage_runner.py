@@ -591,11 +591,16 @@ class NPUEagerBeamStageRunner:
         from vllm.v1.outputs import ModelRunnerOutput
 
         request_ids = list(execution.request_ids)
-        output = ModelRunnerOutput(
-            req_ids=request_ids,
-            req_id_to_index={request_id: index for index, request_id in enumerate(request_ids)},
-            sampled_token_ids=[[0] for _ in request_ids],
-        )
+        if getattr(self.worker, "_gr_owned_npu_v2", False):
+            output = self.worker.native_contract.make_output(
+                ModelRunnerOutput, req_ids=request_ids, sampled_token_ids=[[0] for _ in request_ids]
+            )
+        else:
+            output = ModelRunnerOutput(
+                req_ids=request_ids,
+                req_id_to_index={request_id: index for index, request_id in enumerate(request_ids)},
+                sampled_token_ids=[[0] for _ in request_ids],
+            )
         worker_result = GRWorkerResult(
             session_id=execution.session_id,
             dispatch_id=execution.dispatch_id,
@@ -1045,7 +1050,12 @@ def execute_npu_gr_retirement(worker: Any, scheduler_output: Any) -> Any:
 
     from vllm.v1.outputs import ModelRunnerOutput
 
-    output = ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
+    if getattr(worker, "_gr_owned_npu_v2", False):
+        output = worker.native_contract.make_output(
+            ModelRunnerOutput, req_ids=[], sampled_token_ids=[]
+        )
+    else:
+        output = ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
     setattr(
         output,
         GR_RETIRE_RESULT_ATTR,
