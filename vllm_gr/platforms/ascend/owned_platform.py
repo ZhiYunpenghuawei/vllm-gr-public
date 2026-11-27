@@ -159,6 +159,18 @@ class OwnedNPUPlatform(Platform):
         import torch_npu  # noqa: F401
 
     @classmethod
+    def import_ir_kernels(cls) -> None:
+        from vllm_gr.v1.worker.npu.model_layers import import_model_layer_kernels
+
+        import_model_layer_kernels()
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> Any:
+        from vllm_gr.v1.worker.npu.model_layers import get_default_ir_op_priority
+
+        return get_default_ir_op_priority(vllm_config)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         validate_owned_runtime_config(vllm_config)
         parallel = vllm_config.parallel_config

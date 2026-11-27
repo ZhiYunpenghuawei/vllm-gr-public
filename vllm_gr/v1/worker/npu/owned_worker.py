@@ -176,8 +176,16 @@ class NPUWorker(WorkerBase):
         return self.model_runner
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        from vllm_gr.v1.worker.npu.model_layers import (
+            validate_model_layer_registration,
+            validate_supported_model_config,
+        )
+
+        validate_supported_model_config(self.vllm_config)
+        validate_model_layer_registration()
         with set_current_vllm_config(self.vllm_config):
             self._runner().load_model(load_dummy_weights=load_dummy_weights)
+        validate_model_layer_registration()
 
     def get_model(self) -> torch.nn.Module:
         return self._runner().get_model()

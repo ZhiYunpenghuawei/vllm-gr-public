@@ -25,5 +25,8 @@ class OwnedNPUConfigService(AscendConfigService):
     def finalize_native_config(self, config: Any, gr: GRConfig) -> None:
         del gr
         validate_gr_execution_config(config)
+        from vllm_gr.v1.worker.npu.model_layers import validate_supported_model_config
+
+        validate_supported_model_config(config)
         # Shared GR hooks already own EngineCore initialization. There is no
         # Ascend additional_config validator to sanitize in this backend.
