@@ -99,6 +99,8 @@ class NPUModelRunnerV2:
         self._weight_update_lock = Lock()
         self._weight_update_active = False
         self._owned_graph_registry: Any = None
+        self._graph_qualification_specs: tuple[Any, ...] = ()
+        self._graph_qualification_budget = 0
         self._graph_generation = 0
         self._initial_free_memory, self._total_memory = torch.npu.mem_get_info(device)
 
@@ -259,6 +261,12 @@ class NPUModelRunnerV2:
         available = (
             min(free_after, budget - used_since_start) - peak - self._beam_memory_reservation()
         )
+        if self._graph_qualification_budget:
+            from vllm_gr.v1.worker.npu.owned_graph_runtime import reserve_owned_graph_memory
+
+            available = reserve_owned_graph_memory(
+                self, int(available), self._graph_qualification_budget
+            )
         explicit = self.cache_config.kv_cache_memory_bytes
         if explicit is not None:
             if explicit > available:
@@ -267,6 +275,23 @@ class NPUModelRunnerV2:
         if available <= 0:
             raise RuntimeError("Insufficient KV capacity after NPU model/Beam memory profiling")
         return int(available)
+
+    def configure_prefill_graph_qualification(
+        self, specs: tuple[Any, ...], *, memory_bytes: int
+    ) -> None:
+        """Reserve exact-shape graph probes before KV sizing in a qualification driver."""
+        from vllm_gr.v1.worker.npu.owned_prefill_graph_runtime import StartupGraphSpec
+
+        if self.kv_cache_config is not None or self.request_state.requests:
+            raise RuntimeError(
+                "Graph qualification must be configured before KV allocation and admission"
+            )
+        if not specs or any(not isinstance(spec, StartupGraphSpec) for spec in specs):
+            raise ValueError("Graph qualification requires explicit startup shapes")
+        if type(memory_bytes) is not int or memory_bytes <= 0:
+            raise ValueError("Graph qualification requires a positive memory budget")
+        self._graph_qualification_specs = tuple(specs)
+        self._graph_qualification_budget = memory_bytes
 
     def initialize_kv_cache(self, kv_cache_config: Any) -> None:
         from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -687,6 +712,14 @@ class NPUModelRunnerV2:
         for cache in self.kv_caches:
             cache[1].zero_()
         torch.npu.synchronize(self.device)
+        if self._graph_qualification_specs:
+            from vllm_gr.v1.worker.npu.owned_prefill_graph_runtime import capture_startup_graphs
+
+            try:
+                capture_startup_graphs(self, self._graph_qualification_specs, self._forward_eager)
+            except BaseException as error:
+                self._failed = error
+                raise
         return CompilationTimes(language_model=0.0, encoder=0.0)
 
     def shutdown(self) -> None:
