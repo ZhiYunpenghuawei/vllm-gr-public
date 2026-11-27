@@ -79,10 +79,16 @@ such as `default_use_v2_model_runner`, apply before native configuration.
 The platform supplies the prefill graph runner and Attention backend only
 for the execution modes it implements.
 
-A GR engine requesting Beam Attention claims vLLM's `CUSTOM` backend slot
-before model load. CUDA uses native backend selection. The Ascend bridge
-handles an explicit `CUSTOM` choice and delegates native choices to the
-vendor selector. [Ascend attention bridge](../../../vllm_gr/platforms/ascend/attention_bridge.py)
+Beam Attention is selected by the platform seam: the plugin installs the
+selected GR platform as the process `current_platform`, and
+`GRPlatform.get_attn_backend_cls` returns the imported Beam backend class
+for engines whose GR configuration selects it, delegating every other
+selection to the native platform through the MRO. The shared
+`AttentionBackendEnum.CUSTOM` registry slot is never claimed (vendor
+runtimes may squat it at import time), `attention_config` keeps the value
+the vendor runtime left it, and nothing is registered or installed at
+engine construction.
+[Platform seam](../../../vllm_gr/platforms/interface.py)
 
 <a id="adding-an-in-tree-platform"></a>
 

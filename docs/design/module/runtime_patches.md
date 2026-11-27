@@ -20,15 +20,7 @@ compatibility before installing platform and shared patches. The frontend and En
 patch module verifies its bindings so repeated initialization can reuse an
 existing wrapper.
 
-## GR-PATCH-001 — Ascend CUSTOM Attention Selection
-
-Scope: `backend`; backend ID: `ascend`
-
-The Ascend bridge directs an explicit CUSTOM choice to vLLM's registered
-backend and delegates other selections to the native platform method. Its
-removal depends on vllm-ascend honoring the explicit backend selection.
-
-## GR-PATCH-002 — NPUWorker Initialization Hook
+# GR-PATCH-002 — NPUWorker Initialization Hook
 
 Scope: `backend`; backend ID: `ascend`
 
@@ -130,15 +122,7 @@ finalization and device synchronization. The
 [operator helper](../../../vllm_gr/ops/npu/stage_projection.py) owns the fixed-address
 weights, biases and proxies.
 
-## GR-PATCH-013 — CUSTOM Attention Backend Registration
-
-Scope: `core`; backend ID: `null`
-
-A GR engine selecting Beam attention claims the upstream CUSTOM slot before
-model load. Repeated registration accepts the existing GR handler. Startup
-reports a conflict if another extension owns that slot.
-
-## GR-PATCH-015 — Sliced Vocabulary Projection
+# GR-PATCH-015 — Sliced Vocabulary Projection
 
 Scope: `core`; backend ID: `null`
 

@@ -35,7 +35,6 @@ CORE_PATCH_IDS = (
     "GR-PATCH-008",
     "GR-PATCH-009",
     "GR-PATCH-010",
-    "GR-PATCH-013",
     "GR-PATCH-015",
     "GR-PATCH-022",
 )

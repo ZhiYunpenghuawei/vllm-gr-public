@@ -11,7 +11,7 @@ from vllm_gr.platforms.ascend.config_patch import (
     is_npu_platform,
 )
 
-logger = logging.getLogger("vllm_gr.v1.ascend_compat")
+logger = logging.getLogger(__name__)
 
 _NPU_WORKER_ORIGINAL_ATTR = "_vllm_gr_npu_init_device_original"
 _PENALTY_WARMUP_GUARD_APPLIED = False

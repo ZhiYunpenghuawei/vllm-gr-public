@@ -25,17 +25,13 @@ Owner: `vllm_gr/plugin.py`
 
 Installer: `vllm_gr.plugin.register`
 
+The plugin entry point also installs the selected GR
+platform as the process `current_platform`; the Beam attention seam in
+`GRPlatform.get_attn_backend_cls` replaces the former attention bridge and
+registry-slot patches (GR-PATCH-001 / GR-PATCH-013, removed per their removal
+conditions).
+
 Risk: `high`; process roles: `main`, `engine_core`, `worker`
-
-### GR-PATCH-001 — Ascend CUSTOM Attention Selection
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/platforms/ascend/attention_bridge.py`
-
-Installer: `vllm_gr.v1.attention.selector_patch.apply_custom_attention_backend_patch`
-
-Risk: `critical`; process roles: `engine_core`, `worker`
 
 ### GR-PATCH-002 — NPUWorker Initialization Hook
 
@@ -150,16 +146,6 @@ Installer: `vllm_gr.v1.worker.model_runner_patch.apply_worker_patches`
 Risk: `critical`; process roles: `npu_worker`
 
 Planned Ascend runners bind the V1 stage implementation at model load. The native runner keeps ownership of its pending NPU stage and retirement state.
-
-### GR-PATCH-013 — CUSTOM Attention Backend Registration
-
-Scope: `core`; backend ID: `null`
-
-Owner: `vllm_gr/v1/attention/selector_patch.py`
-
-Installer: `vllm_gr.v1.attention.selector_patch.prepare_engine_attention`
-
-Risk: `high`; process roles: `engine_core`, `worker`
 
 ### GR-PATCH-015 — Sliced Vocabulary Projection
 

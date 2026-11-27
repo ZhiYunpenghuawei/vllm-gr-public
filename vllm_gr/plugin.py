@@ -17,6 +17,28 @@ import logging
 logger = logging.getLogger("vllm_gr.plugin")
 
 
+def install_gr_platform(integration: object) -> bool:
+    """Serve as the process platform so GR platform methods reach vLLM.
+
+    The GR platform is a subclass of the selected native platform, so every
+    native consumer keeps working through the MRO; the only addition
+    reachable from vLLM is the Beam attention seam in
+    ``get_attn_backend_cls``, which vLLM's cached selector consults lazily
+    on every backend resolution. Idempotent; returns whether this call
+    performed the replacement.
+    """
+    import vllm.platforms as vllm_platforms
+
+    from vllm_gr.platforms.interface import GRPlatform
+
+    if isinstance(vllm_platforms.current_platform, GRPlatform):
+        return False
+    if not isinstance(integration, GRPlatform):
+        return False
+    vllm_platforms.current_platform = integration
+    return True
+
+
 def initialize_runtime(*, required: bool = True) -> dict[str, object]:
     """Initialize the current process for vllm-gr runtime usage.
 
@@ -34,6 +56,7 @@ def initialize_runtime(*, required: bool = True) -> dict[str, object]:
         if required:
             raise
         return {"patch_count": 0, "patches": {}}
+    platform_seam = install_gr_platform(integration)
     configure_model_runner_default()
     integration.check_environment()
 
@@ -45,8 +68,11 @@ def initialize_runtime(*, required: bool = True) -> dict[str, object]:
     state: dict[str, object] = {
         "patch_count": patch_count,
         "patches": report.statuses() if report is not None else {},
+        "platform_seam": platform_seam,
     }
-    logger.debug("vllm-gr runtime initialized: patches=%d", patch_count)
+    logger.debug(
+        "vllm-gr runtime initialized: patches=%d, platform_seam=%s", patch_count, platform_seam
+    )
     return state
 
 

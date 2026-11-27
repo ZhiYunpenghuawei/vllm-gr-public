@@ -78,7 +78,6 @@ for module_name in (
     "vllm_gr.v1.worker.npu.npu_model_runner_patch",
     "vllm_gr.v1.attention.backends.beam_attn_gpu",
     "vllm_gr.v1.attention.backends.beam_attn_npu",
-    "vllm_gr.v1.ascend_compat",
     "vllm_gr.platforms.ascend.config_patch",
     "vllm_gr.v1.worker.npu.startup_patch",
     "vllm_gr.v1.worker.npu.kv_layout_patch",
@@ -161,7 +160,6 @@ import sys
 # contract is that vllm-gr's own Ascend integration stays unloaded while the
 # CUDA integration initializes.
 blocked = (
-    "vllm_gr.v1.ascend_compat",
     "vllm_gr.platforms.ascend.config_patch",
     "vllm_gr.platforms.ascend.spawn_patch",
     "vllm_gr.v1.worker.npu.startup_patch",
@@ -183,8 +181,12 @@ from vllm.platforms.cuda import CudaPlatform
 platform = CudaPlatform()
 assert isinstance(platform, CudaGRPlatform.native_platform_type)
 if not __import__("torch").cuda.is_available():
-    # No device is visible on host-only builds.
-    platform.get_device_capability = lambda *args, **kwargs: None
+    # No device is visible on host-only builds. Stub the capability on the
+    # class: initialize_runtime installs the GR platform instance as
+    # current_platform, and that instance inherits the stub through the MRO.
+    CudaPlatform.get_device_capability = classmethod(
+        lambda *args, **kwargs: None
+    )
 vllm.platforms.current_platform = platform
 
 from vllm_gr.plugin import initialize_runtime

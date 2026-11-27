@@ -39,18 +39,8 @@ class AscendGRPlatform(GRPlatform, NPUPlatform):
     backend_id: str = "ascend"
     canonical_constraint_backend = "npu"
     default_use_v2_model_runner = False
-    beam_attention_backend = "vllm_gr.v1.attention.backends.beam_attn.BeamAttentionBackend"
-    # vllm-ascend registers AttentionBackendEnum.CUSTOM -> "ASCEND" at import
-    # time and clears attention_config.backend during config finalization.
-    # Beam selection is routed at the per-process attention seam from the GR
-    # configuration marker instead: the shared slot stays untouched by GR,
-    # attention_config keeps its native value, and the L1 slot mechanism
-    # above remains available if routing is disabled.
-    routes_attention_backend = True
-    bridged_custom_attention_owners = ("ASCEND",)
     # Semantic ownership includes deferred hooks and existing shared dispatch.
     patch_ids: tuple[str, ...] = (
-        "GR-PATCH-001",
         "GR-PATCH-002",
         "GR-PATCH-012",
         "GR-PATCH-016",
@@ -135,30 +125,7 @@ class AscendGRPlatform(GRPlatform, NPUPlatform):
         from vllm_gr.v1.worker.npu.startup_patch import patch_npu_worker_init_device
 
         worker_count = patch_npu_worker_init_device()
-
-        # Install the Beam attention router before any native ModelRunner
-        # resolves its attention backend. vllm-ascend clears
-        # attention_config.backend to None during config finalization; an
-        # unpatched resolution yields the native backend, which the native
-        # graph manager then records as updatable-graph capable, routing FULL
-        # decode replays through machinery that cannot resolve Beam update
-        # tasks. The router answers the imported Beam class for GR engines
-        # from the GR configuration marker, from one early per-process
-        # installation with no engine-construction-time ordering left.
-        from vllm_gr.v1.attention.selector_patch import install_beam_attention_routing
-
-        routing_count = install_beam_attention_routing()
-        return spawn_count + worker_count + routing_count
-
-    def install_attention_selector(self, native_platform: type) -> int:
-        from .attention_bridge import install
-
-        from vllm_gr.v1.attention.selector_patch import install_beam_attention_routing
-
-        # The bridge preserves explicit CUSTOM for direct platform queries;
-        # the selector-level routing keeps the runner (and the native graph
-        # manager that records its backend class) on the imported Beam class.
-        return install(native_platform) + install_beam_attention_routing()
+        return spawn_count + worker_count
 
     def get_model_runner_hooks(self) -> ModelRunnerInstaller:
         return cast(

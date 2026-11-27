@@ -236,9 +236,17 @@ def bind_after_model_load(
             # A full load constructs a new model even when its plan is unchanged.
             close_backend_binding(self)
         try:
-            from vllm_gr.v1.attention.selector_patch import prepare_engine_attention
+            # Beam attention is selected by the platform seam installed as
+            # the process platform; a GR worker without it cannot resolve the
+            # Beam backend, so fail loudly instead of silently going native.
+            import vllm.platforms as vllm_platforms
 
-            prepare_engine_attention(getattr(self, "vllm_config", None))
+            from vllm_gr.platforms.interface import GRPlatform
+
+            if not isinstance(vllm_platforms.current_platform, GRPlatform):
+                raise RuntimeError(
+                    "GR model load requires the GR platform as current_platform"
+                )
             result = original(self, *args, **kwargs)
             bind_backend_services(self)
         except BaseException:

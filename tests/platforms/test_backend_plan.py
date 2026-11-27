@@ -727,10 +727,7 @@ def test_bound_constraint_honors_explicit_torch_oracle(
 def test_custom_platform_binds_its_attention_layers_to_one_runner(
     implementation: FakeIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vllm.v1.attention.backends import registry
-
     from vllm_gr.config import GRAttentionBackend
-    from vllm_gr.v1.attention.selector_patch import prepare_engine_attention
 
     class VendorLayer:
         execution: Any = None
@@ -746,16 +743,10 @@ def test_custom_platform_binds_its_attention_layers_to_one_runner(
                 self.execution = None
 
     native = config()
-    native.attention_config = SimpleNamespace(backend=registry.AttentionBackendEnum.CUSTOM)
+    native.attention_config = SimpleNamespace(backend=None)
     replace(
         GRConfig.from_vllm_config(native), attention_backend=GRAttentionBackend.CUSTOM
     ).write_to_vllm_config(native)
-    monkeypatch.setattr(registry, "_ATTN_OVERRIDES", {})
-    with pytest.raises(ValueError, match="does not support CUSTOM"):
-        prepare_engine_attention(native)
-    implementation.beam_attention_backend = "vendor_platform.CustomAttention"
-    prepare_engine_attention(native)
-    assert registry.AttentionBackendEnum.CUSTOM.get_path() == implementation.beam_attention_backend
     admit_backend_plan(native)
     layer = VendorLayer()
     model = SimpleNamespace(modules=lambda: (SimpleNamespace(impl=layer), SimpleNamespace()))

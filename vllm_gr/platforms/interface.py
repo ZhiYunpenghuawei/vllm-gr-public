@@ -129,24 +129,47 @@ class GRPlatform(Platform, ABC):
     canonical_constraint_backend = "platform"
     backend_id: str
     default_use_v2_model_runner: bool | None = None
-    beam_attention_backend: str | None = None
-    # Native CUSTOM-slot claims that this platform's attention bridge
-    # supersedes when a GR engine claims the slot for the beam backend.
-    # vllm-ascend registers "ASCEND" at import time; the Ascend bridge
-    # resolves Beam selection through the registry, so the beam backend must
-    # overwrite that claim instead of rejecting it. Unknown owners still fail.
-    bridged_custom_attention_owners: tuple[str, ...] = ()
-    # Platforms that resolve Beam attention through their own early-installed
-    # attention router instead of claiming the shared AttentionBackendEnum
-    # CUSTOM registry slot. Vendor runtimes may squat that slot at import
-    # time and clear attention_config.backend during config finalization,
-    # which makes slot ownership a conflict surface. Routing platforms leave
-    # the shared slot untouched, keep attention_config at the value the
-    # vendor runtime left it, and resolve Beam from the GR configuration
-    # marker, so nothing is registered or installed at engine construction.
-    routes_attention_backend: bool = False
     vendor_distribution: str | None = None
     patch_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def get_attn_backend_cls(
+        cls,
+        selected_backend,
+        attn_selector_config,
+        num_heads: int | None = None,
+    ):
+        """The single Beam attention selection seam.
+
+        vLLM's cached selector reaches the platform lazily on every backend
+        resolution, so answering the Beam backend path here covers every
+        native consumer - the ModelRunner's backend resolution and attention
+        layer construction - from one seam that exists from class
+        definition. The shared AttentionBackendEnum.CUSTOM registry slot is
+        never claimed (vendor runtimes may squat it at import time and clear
+        ``attention_config.backend`` during config finalization), nothing is
+        installed at engine construction, and ``attention_config`` keeps the
+        value the vendor runtime left it: the Beam intent travels in the GR
+        configuration marker alone.
+
+        The platform-method contract is a dotted class path; the selector
+        imports it. The resolved class (not an AscendAttentionBackend
+        subclass) also keeps vllm-ascend's graph manager on the plain replay
+        path: ``use_updatable_graph`` is False for it, and the
+        updatable-graph machinery cannot resolve update tasks for Beam
+        metadata.
+        """
+        from vllm_gr.v1.attention.selector_patch import _gr_attention_is_custom
+
+        if _gr_attention_is_custom():
+            from vllm_gr.v1.attention.selector_patch import _BEAM_BACKEND_PATH
+
+            return _BEAM_BACKEND_PATH
+        return super().get_attn_backend_cls(
+            selected_backend,
+            attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
+        )
 
     @abstractmethod
     def resolve(self, request: BackendRequest) -> BackendPlan:
@@ -163,10 +186,6 @@ class GRPlatform(Platform, ABC):
 
     def validate_request(self, limits: BeamLimits, gr: GRConfig, request: BeamBatchRequest) -> None:
         """Optional EngineCore-only checks. Raise GRDeviceRequestError for bad requests."""
-
-    def install_attention_selector(self, native_platform: type) -> int:
-        """Bridge native CUSTOM selection only on platforms that need it."""
-        return 0
 
     def create_config_service(self) -> BackendConfigService:
         from .config import BackendConfigService

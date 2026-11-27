@@ -20,7 +20,9 @@ patches:
     backend_id: null
     owner: vllm_gr/plugin.py
     installer: vllm_gr.plugin.register
-    activation: vLLM loads the vllm.general_plugins entry point and the GR platform selected by external-first discovery for current_platform passes environment checks
+    activation: vLLM loads the vllm.general_plugins entry point; the selected GR platform
+      is installed as the process current_platform (the Beam attention seam) before
+      environment checks and runtime patches
     validator_or_test:
       - tests/patch/test_patch_initialization.py::test_plugin_exposes_simple_per_patch_status
       - tests/platforms/test_runtime_wiring.py
@@ -31,24 +33,6 @@ patches:
     risk: high
     contract: plugin-entrypoint
     removal_condition: runtime patch installation is no longer required
-
-  - id: GR-PATCH-001
-    scope: backend
-    backend_id: ascend
-    owner: vllm_gr/platforms/ascend/attention_bridge.py
-    installer: vllm_gr.v1.attention.selector_patch.apply_custom_attention_backend_patch
-    activation: the admitted GR engine requests CUSTOM on the Ascend platform
-    validator_or_test:
-      - tests/v1/test_ascend_compat.py::test_selector_installation_is_idempotent_and_force_uses_original
-      - tests/v1/test_ascend_compat.py::test_selector_reinstalls_over_replaced_upstream_target
-      - tests/v1/test_ascend_compat.py::test_selector_cache_reset_preserves_installed_callable
-      - tests/engine/test_gr_config.py::test_attention_selector_config_reader_propagates_validation_errors
-      - tests/integration/test_ascend_attention_backend.py
-    process_roles: [engine_core, worker]
-    target: vllm_ascend.platform.NPUPlatform.get_attn_backend_cls
-    risk: critical
-    contract: attention-selector-signature
-    removal_condition: vllm-ascend respects the explicit selected_backend argument
 
   - id: GR-PATCH-002
     scope: backend
@@ -279,35 +263,6 @@ patches:
     risk: critical
     contract: docs/design/feature/npu_decode_execution.md
     removal_condition: vLLM-Ascend exposes stable grouped input/output, Worker utility, and constraint-backend lifecycle hooks
-
-  - id: GR-PATCH-013
-    scope: core
-    backend_id: null
-    owner: vllm_gr/v1/attention/selector_patch.py
-    execution: Beam attention layers use the executor published by their runner binding
-    installer: vllm_gr.v1.attention.selector_patch.prepare_engine_attention
-    activation: an engine admits GR CUSTOM attention and claims the native CUSTOM slot before model load
-    validator_or_test:
-      - tests/v1/test_ascend_compat.py::test_custom_slot_preserves_external_owner_before_import
-      - tests/v1/test_ascend_compat.py::test_custom_slot_registers_once_and_resolves_lazily
-      - tests/v1/attention/test_beam_attention_platform_execution.py
-      - tests/v1/attention/test_beam_attention_metadata.py
-      - tests/v1/attention/test_attention_backend_custom.py
-    process_roles: [engine_core, worker]
-    target: vllm.v1.attention.backends.registry.AttentionBackendEnum.CUSTOM
-    risk: high
-    contract: custom-attention-registry
-    ownership:
-      metadata_builder: vllm_gr.v1.attention.backends.beam_attn_metadata
-      gpu_execution: vllm_gr.v1.attention.backends.beam_attn_gpu
-      npu_execution: vllm_gr.v1.attention.backends.beam_attn_npu
-      backend_registration: vllm_gr.v1.attention.selector_patch
-      backend_facade: vllm_gr.v1.attention.backends.beam_attn
-      compatibility_exports:
-        - BeamAttentionMetadata
-        - BeamAttentionMetadataBuilder
-        - BEAM_DATA_VAR
-    removal_condition: vLLM supports named third-party backend identities without a shared CUSTOM slot
 
   - id: GR-PATCH-015
     scope: core

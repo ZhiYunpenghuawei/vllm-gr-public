@@ -40,7 +40,6 @@ class CudaGRPlatform(GRPlatform, CudaPlatformBase):
     backend_id: str = "cuda"
     canonical_constraint_backend = "cuda"
     default_use_v2_model_runner = False
-    beam_attention_backend = "vllm_gr.v1.attention.backends.beam_attn.BeamAttentionBackend"
     # Semantic ownership includes hooks still installed by shared dispatch.
     patch_ids: tuple[str, ...] = ("GR-PATCH-011",)
 
