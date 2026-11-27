@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import os
 import struct
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,10 @@ def _validate_extended_unconstrained_kv_capacity(config: Any, capacity: int) -> 
 
 def validate_npu_unconstrained_runner(config: Any) -> None:
     """Check the catalog-free NPU adapter before model or request allocation."""
+    if os.environ.get("VLLM_GR_OWNED_NPU") == "1":
+        if not getattr(config, "use_v2_model_runner", False):
+            raise ValueError("Owned NPU Beam requires ModelRunner V2")
+        return
     if getattr(config, "use_v2_model_runner", False):
         raise ValueError(
             "NPU unconstrained beam_search requires ModelRunner V1; set VLLM_USE_V2_MODEL_RUNNER=0"

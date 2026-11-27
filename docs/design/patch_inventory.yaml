@@ -248,10 +248,10 @@ patches:
   - id: GR-PATCH-012
     scope: backend
     backend_id: ascend
-    owner: vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py
+    owner: vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py, vllm_gr/v1/worker/npu/v2/runner_installer.py
     shared_helpers: vllm_gr/v1/worker/model_runner_common.py, vllm_gr/v1/worker/npu/npu_model_runner_inputs.py, vllm_gr/v1/worker/model_runner_contracts.py, vllm_gr/v1/worker/gr_gc.py, vllm_gr/v1/worker/gr_context.py, vllm_gr/v1/worker/gr_execution.py, vllm_gr/v1/worker/hot_update.py, vllm_gr/constraints/versioned_table.py, vllm_gr/ops/npu/stage_projection.py, vllm_gr/v1/worker/npu/startup_patch.py
     installer: vllm_gr.v1.worker.model_runner_patch.apply_worker_patches
-    activation: the Ascend provider discovers NPUModelRunner and binds its planned lifecycle after model load; the delayed NPUWorker.init_device wrapper mounts common Worker utilities before native initialization, independently of the management listener; online Trie reload remains rejected by Core on NPU
+    activation: the legacy Ascend provider discovers NPUModelRunner and binds its planned lifecycle after model load; the delayed NPUWorker.init_device wrapper mounts common Worker utilities before native initialization. The owned provider installs the V2-specific execute/sample and binding hooks on its own runner and Worker. Online Trie reload remains rejected by Core on NPU.
     binding_validation: uses the same admitted-plan and native max_model_len autofit checks as GR-PATCH-011
     validator_or_test:
       - vllm_gr.v1.worker.model_runner_patch.validate_model_runner_patch
@@ -267,12 +267,14 @@ patches:
       - tests/sidecar/test_worker_update.py
       - tests/ops/test_npu_stage_logits.py
       - tests/v1/worker/test_npu_stage_projection_lifecycle.py
+      - tests/v1/worker/test_owned_npu_stage_adapter.py
     process_roles: [npu_worker]
     target: >-
       NPUModelRunner execute_model, _prepare_inputs, sample_tokens and graph/lifecycle hooks,
       and NPUWorker.reload_trie (native _sample and _bookkeeping_sync unchanged).
       Stage projection wraps the instance LogitsProcessor._get_logits, NPUModelRunner.reload_weights,
       and NPUWorker start_weight_update, update_weights, and finish_weight_update.
+      Owned NPUModelRunnerV2 uses independent execute_model, sample_tokens, model-load and teardown bindings.
     risk: critical
     contract: docs/design/feature/npu_decode_execution.md
     removal_condition: vLLM-Ascend exposes stable grouped input/output, Worker utility, and constraint-backend lifecycle hooks

@@ -334,7 +334,14 @@ class NPUEagerBeamStageRunner:
         self.worker._gr_npu_stage_runner = self
         token = None
         try:
-            runtime_output = self._runtime_scheduler_output(scheduler_output, plan)
+            owned_v2 = getattr(self.worker, "_gr_owned_npu_v2", False)
+            # V2 keeps native request counters logical; only its device inputs
+            # expand into physical beam rows.
+            runtime_output = (
+                scheduler_output
+                if owned_v2
+                else self._runtime_scheduler_output(scheduler_output, plan)
+            )
             self.worker._current_scheduler_output = runtime_output
             self.worker._gr_npu_stage_plan = plan
             if plan.execution.kind == "decode":
@@ -371,11 +378,18 @@ class NPUEagerBeamStageRunner:
                 self.worker._current_beam_data = {}
                 self.worker._current_beam_info = {"beam_data": {}, "req_ids": []}
 
-            result = original(self.worker, runtime_output, *args, **kwargs)
-            state = getattr(self.worker, "execute_model_state", None)
-            logits = getattr(state, "logits", None)
-            if logits is None:
-                logits = getattr(result, "logits", None)
+            if owned_v2:
+                from vllm_gr.v1.worker.npu.v2.stage_adapter import execute_v2_stage
+
+                result, logits = execute_v2_stage(
+                    self, plan, metadata, original, runtime_output, *args, **kwargs
+                )
+            else:
+                result = original(self.worker, runtime_output, *args, **kwargs)
+                state = getattr(self.worker, "execute_model_state", None)
+                logits = getattr(state, "logits", None)
+                if logits is None:
+                    logits = getattr(result, "logits", None)
             if not isinstance(logits, torch.Tensor):
                 raise RuntimeError("NPU GR stage did not publish model logits")
             self.logits = logits
@@ -563,6 +577,8 @@ class NPUEagerBeamStageRunner:
                     decision["out_log_probs"],
                     parents,
                 )
+        if getattr(self.worker, "_gr_owned_npu_v2", False) and execution.kind == "decode":
+            self.worker.complete_decode()
         if is_last:
             if terminal_result is None:
                 raise RuntimeError("terminal NPU Beam stage produced no result")
