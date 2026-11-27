@@ -45,6 +45,12 @@ def get_beam_graph_runtime_stats(worker: Any) -> dict[str, Any]:
         "captured_widths": sorted(int(width) for width in getattr(runner, "_beam_graph_keys", ())),
         "full_dispatches": int(getattr(runner, "_beam_graph_full_dispatch_count", 0)),
     }
+    if getattr(runner, "_gr_owned_npu_v2", False):
+        registry = getattr(runner, "_owned_graph_registry", None)
+        stats["owned_graph_capture_count"] = registry.capture_count if registry is not None else 0
+        stats["owned_graph_replay_count"] = registry.replay_count if registry is not None else 0
+        stats["owned_graph_miss_count"] = int(getattr(runner, "_owned_graph_forward_miss_count", 0))
+        stats["owned_graph_generation"] = runner._graph_generation
     prefill = getattr(runner, "_prefill_graph_runner", None)
     if prefill is not None:
         stats["gr_prefill_buckets"] = list(prefill.buckets)

@@ -534,11 +534,23 @@ class NPUModelRunnerV2:
 
     @torch.inference_mode()
     def forward_prepared(self, prepared: PreparedForward, *, capture: bool = False) -> torch.Tensor:
+        if capture:
+            raise ValueError("Use the reserved startup capture API for owned NPU graphs")
+        from vllm_gr.v1.worker.npu.owned_graph_runtime import forward_with_owned_graphs
+
+        return forward_with_owned_graphs(self, prepared, self._forward_eager)
+
+    @torch.inference_mode()
+    def capture_prepared(self, prepared: PreparedForward, *, reserved: Any) -> bool:
+        from vllm_gr.v1.worker.npu.owned_graph_runtime import capture_owned_prepared
+
+        return capture_owned_prepared(self, prepared, self._forward_eager, reserved=reserved)
+
+    @torch.inference_mode()
+    def _forward_eager(self, prepared: PreparedForward) -> torch.Tensor:
         from vllm.config import CUDAGraphMode
         from vllm.forward_context import BatchDescriptor, set_forward_context
 
-        if capture:
-            raise ValueError("Owned NPU V2 graph capture requires a dedicated graph owner")
         model = self.get_model()
         rows = prepared.input_ids.numel()
         token = BEAM_DATA_VAR.set(prepared.beam_info)

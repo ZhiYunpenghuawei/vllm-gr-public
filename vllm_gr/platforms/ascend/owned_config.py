@@ -18,6 +18,9 @@ class OwnedNPUConfigService(AscendConfigService):
             )
         if not getattr(config, "use_v2_model_runner", False):
             raise ValueError("Owned NPU backend requires ModelRunner V2")
+        from vllm_gr.v1.worker.npu.owned_graph_runtime import validate_owned_graph_requirements
+
+        validate_owned_graph_requirements(gr)
         # Shared validation is called by EngineArgs after publishing the GR snapshot.
         if getattr(getattr(config, "model_config", None), "quantization", None) is not None:
             raise ValueError("Owned NPU V2 does not support quantization")
