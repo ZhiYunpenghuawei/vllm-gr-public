@@ -26,6 +26,11 @@ def configure_model_runner_default() -> None:
     LEGACY ``beam_data`` frame stack is not supported under V2 and fails fast.
     """
     value = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+    if os.environ.get("VLLM_GR_OWNED_NPU") == "1":
+        if value is not None and value.strip().lower() not in ("1", "true", "yes", "on"):
+            raise ValueError("The owned NPU backend requires ModelRunner V2")
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        return
     if value is None:
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         logger.info(

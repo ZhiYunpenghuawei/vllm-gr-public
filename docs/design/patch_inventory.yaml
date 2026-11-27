@@ -54,7 +54,7 @@ patches:
     backend_id: ascend
     owner: vllm_gr/v1/worker/npu/startup_patch.py
     installer: vllm_gr.v1.worker.npu.startup_patch.patch_npu_worker_init_device
-    activation: the selected NPU provider revalidates early config bindings on every call and wraps NPUWorker.init_device only when needed; unavailable native worker imports are retried on later initialization
+    activation: the legacy Ascend provider revalidates early config bindings on every call and wraps NPUWorker.init_device only when needed; unavailable native worker imports are retried on later initialization. The opt-in owned NPU provider constructs its Worker directly and does not install this patch.
     validator_or_test:
       - tests/v1/test_ascend_compat.py::test_npu_worker_patch_is_lazy_and_preserves_lifecycle_contract
       - tests/v1/test_ascend_compat.py::test_npu_worker_reinstalls_over_replaced_upstream_target
@@ -341,7 +341,7 @@ patches:
     backend_id: ascend
     owner: vllm_gr/v1/worker/npu/startup_patch.py
     installer: vllm_gr.v1.worker.npu.startup_patch.apply_penalties_warmup_oom_guard
-    activation: NPUWorker init_device runs in the child process and the native penalties warmup callable is present
+    activation: legacy Ascend NPUWorker init_device runs in the child process and the native penalties warmup callable is present; disabled for the owned Beam-only NPU provider
     validator_or_test: []  # No behavioural test yet; the native callable guard runs at install time.
     process_roles: [npu_worker]
     target: vllm_ascend.model_executor.warmup.kernel_warmup.penalties_triton_warmup
@@ -354,7 +354,7 @@ patches:
     backend_id: ascend
     owner: vllm_gr/platforms/ascend/config_patch.py
     installer: vllm_gr.platforms.ascend.config_patch.apply_engine_core_config_sanitizer and install_ascend_config_filter
-    activation: NPU engine configuration and every worker plugin initialization, independently of the device hook; repair native config caller bindings even when the sanitizer is installed; entrypoint re-asserted on every create_engine_config call and initializes the shared EngineCore plan before native construction
+    activation: legacy Ascend NPU engine configuration and worker plugin initialization, independently of the device hook; repair native config caller bindings even when the sanitizer is installed; entrypoint re-asserted on every create_engine_config call and initializes the shared EngineCore plan before native construction. Owned NPU uses the shared Core hooks directly without vendor config filtering.
     validator_or_test:
       - tests/v1/test_ascend_compat.py::test_ascend_config_filter_preserves_engine_identity_and_gr_config
       - tests/v1/test_ascend_compat.py::test_ascend_config_filter_restores_mapping_on_native_failure
@@ -373,7 +373,7 @@ patches:
     backend_id: ascend
     owner: vllm_gr/v1/worker/npu/kv_layout_patch.py
     installer: vllm_gr.v1.worker.npu.kv_layout_patch.apply_npu_contiguous_kv_cache_patch
-    activation: NPUWorker init_device before native runner construction; known Ascend 0.30.0rc2 bindings
+    activation: legacy Ascend NPUWorker init_device before native runner construction; known Ascend 0.30.0rc2 bindings. Owned NPU allocates its KV layout directly.
     validator_or_test:
       - tests/v1/test_npu_kv_layout.py
       - tests/v1/test_ascend_compat.py::test_npu_worker_patch_is_lazy_and_preserves_lifecycle_contract

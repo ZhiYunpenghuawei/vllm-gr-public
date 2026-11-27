@@ -17,6 +17,11 @@ rationale for each hook is in [runtime patches](module/runtime_patches.md).
 
 ## Active patches
 
+The experimental owned NPU V2 provider (`VLLM_GR_OWNED_NPU=1`) constructs its
+own platform and Worker, uses shared EngineCore hooks and retains spawn protection.
+Legacy-only patches 002, 018, 019 and 021 are not installed in this mode.
+Its runner integration is developed separately from the legacy V1 patch targets.
+
 ### GR-PATCH-000 — Runtime Plugin Activation
 
 Scope: `core`; backend ID: `null`

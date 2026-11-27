@@ -84,6 +84,9 @@ Issues = "https://github.com/JiusiServe/vllm-gr/issues"
 [project.entry-points."vllm.general_plugins"]
 vllm_gr = "vllm_gr.plugin:register"
 
+[project.entry-points."vllm.platform_plugins"]
+vllm_gr_owned_npu = "vllm_gr.platforms.ascend.owned_platform_plugin:register"
+
 [project.entry-points."vllm_gr.platform_backends"]
 cuda = "vllm_gr.platforms.cuda.provider:CUDA_BACKEND"
 ascend = "vllm_gr.platforms.ascend.provider:NPU_BACKEND"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
+import os
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from vllm_gr.config.backend_plan import BackendPlan, BackendRequest, PlanData
@@ -166,4 +167,76 @@ class NPUBackendProvider(BuiltinPlanSupport):
         return NPUConstrainedTopKExecution(device=device)
 
 
-NPU_BACKEND = NPUBackendProvider()
+@dataclass(frozen=True)
+class OwnedNPUBackendProvider(NPUBackendProvider):
+    """Development provider for the owned NPU platform; no vendor plugin is used."""
+
+    vendor_version_range: ClassVar[str | None] = None
+    vendor_distribution: ClassVar[str | None] = None
+    patch_ids: ClassVar[tuple[str, ...]] = ("GR-PATCH-012", "GR-PATCH-016")
+
+    def matches(self, identity: PlatformIdentity) -> bool:
+        return identity.device_type == "npu" and identity.has_lineage(
+            "vllm_gr.platforms.ascend.owned_platform.OwnedNPUPlatform"
+        )
+
+    def resolve(self, request: BackendRequest) -> BackendPlan:
+        if request.options.to_dict():
+            raise ValueError("Owned NPU backend accepts no additional backend options")
+        gr = request.config.to_dict()
+        constraint = "canonical" if request.has_constraint_table else "none"
+        return BackendPlan(
+            self.backend_id,
+            self.api_version,
+            request,
+            PlanData(
+                {
+                    "runner": "vllm_gr.v1.worker.npu.v2.runner_installer",
+                    "attention": "vllm_gr.v1.attention.backends.beam_attn_npu",
+                    "prefill_attention": "ascend.cascade",
+                    "decode_attention": gr["npu_decode_execution"] or "auto",
+                    "requires_attention": True,
+                    "constraint": constraint,
+                    "constraint_implementation": "npu" if constraint != "none" else None,
+                    "stage": "ascend.v2",
+                    "graph": "capture-with-eager-fallback" if gr["beam_graph_enabled"] else "eager",
+                }
+            ),
+        )
+
+    def create_config_service(self) -> BackendConfigService:
+        from .owned_config import OwnedNPUConfigService
+
+        return OwnedNPUConfigService()
+
+    def check_environment(self) -> dict[str, str]:
+        from importlib.util import find_spec
+        from ..compat import check_vllm_runtime, installed_version
+
+        report = check_vllm_runtime()
+        if installed_version("vllm-ascend") is not None or find_spec("vllm_ascend") is not None:
+            raise RuntimeError("Owned NPU runtime requires an environment without vLLM-Ascend")
+        version = installed_version("torch-npu")
+        if version is None:
+            raise RuntimeError("Owned NPU runtime requires torch-npu")
+        report["torch-npu"] = version
+        report["platform"] = "npu"
+        return report
+
+    def apply_runtime_patches(self, *, force: bool = False) -> int:
+        del force
+        from .spawn_patch import apply_npu_spawn_patch
+
+        return int(apply_npu_spawn_patch())
+
+    def get_model_runner_hooks(self) -> ModelRunnerInstaller:
+        return cast(
+            ModelRunnerInstaller, import_module("vllm_gr.v1.worker.npu.v2.runner_installer")
+        )
+
+
+NPU_BACKEND = (
+    OwnedNPUBackendProvider()
+    if os.environ.get("VLLM_GR_OWNED_NPU") == "1"
+    else NPUBackendProvider()
+)
