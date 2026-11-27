@@ -65,6 +65,7 @@ class NPUEagerBeamStageRunner:
         self.previous: BeamBatchExecutionView | None = None
         self.pending_plan: NPUEagerStagePlan | None = None
         self.execution_error: Exception | None = None
+        self.failed_execution: BeamBatchExecutionView | None = None
         self.logical_scheduler_output: Any = None
         self.prefill_candidates: Any = None
         self.latest_token_ids: torch.Tensor | None = None
@@ -396,6 +397,9 @@ class NPUEagerBeamStageRunner:
             return result
         except Exception as error:
             self.execution_error = error
+            self.failed_execution = plan.execution
+            if getattr(self.worker, "_gr_owned_npu_v2", False):
+                self.worker._failed = error
             self.pending_plan = None
             self.logits = None
             raise
@@ -913,6 +917,9 @@ class NPUEagerBeamStageRunner:
         )
 
     def _release(self) -> None:
+        if getattr(self.worker, "_gr_owned_npu_v2", False):
+            # Wait for device writes, decisions and terminal copies before reuse.
+            torch.npu.synchronize(self.worker.device)
         if self.attention_batch is not None:
             request_ids = tuple(session.session_id for session in self.attention_batch.sessions)
             self.attention_batch.end_session()
@@ -1016,20 +1023,25 @@ def execute_npu_gr_retirement(worker: Any, scheduler_output: Any) -> Any:
     if previous_metadata == metadata and previous_output is not None:
         return previous_output
     owner = getattr(worker, "_gr_npu_stage_runner", None)
-    if (
-        owner is None
-        or owner.closed
-        or owner.pending_plan is not None
-        or owner.previous is None
-        or owner.previous.session_id != metadata.session_id
-        or owner.previous.owner_generation != metadata.owner_generation
-    ):
-        raise RuntimeError("Asynchronous scheduling retirement has no matching live NPU owner")
-    owner._release()
-    event = worker.prepare_inputs_event
-    if event is not None:
-        event.synchronize()
-    worker._update_states(scheduler_output)
+    if getattr(worker, "_gr_owned_npu_v2", False):
+        from vllm_gr.v1.worker.npu.v2.stage_adapter import retire_v2_stage
+
+        retire_v2_stage(worker, owner, metadata, scheduler_output)
+    else:
+        if (
+            owner is None
+            or owner.closed
+            or owner.pending_plan is not None
+            or owner.previous is None
+            or owner.previous.session_id != metadata.session_id
+            or owner.previous.owner_generation != metadata.owner_generation
+        ):
+            raise RuntimeError("Asynchronous scheduling retirement has no matching live NPU owner")
+        owner._release()
+        event = worker.prepare_inputs_event
+        if event is not None:
+            event.synchronize()
+        worker._update_states(scheduler_output)
 
     from vllm.v1.outputs import ModelRunnerOutput
 

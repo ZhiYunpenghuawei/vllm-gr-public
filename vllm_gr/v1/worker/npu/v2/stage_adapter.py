@@ -48,3 +48,29 @@ def execute_v2_stage(
     if not isinstance(logits, torch.Tensor) or logits.shape[0] != rows:
         raise RuntimeError("Owned NPU V2 Decode returned invalid physical logits rows")
     return None, logits
+
+
+def retire_v2_stage(runner: Any, owner: Any, metadata: Any, scheduler_output: Any) -> None:
+    """Retire only the matching owner, after all device consumers have drained."""
+    binding = None if owner is None else (owner.failed_execution or owner.previous)
+    if (
+        owner is None
+        or binding is None
+        or binding.session_id != metadata.session_id
+        or binding.owner_generation != metadata.owner_generation
+        or owner.pending_plan is not None
+    ):
+        raise RuntimeError("Owned NPU V2 retirement has no matching drained owner")
+    if not set(binding.request_ids).issubset(scheduler_output.finished_req_ids):
+        raise ValueError("Owned NPU V2 retirement must finish every logical request")
+    torch.npu.synchronize(runner.device)
+    runner.abandon_pending_dispatch()
+    # A failed forward may have poisoned the runner. Release only owned state;
+    # do not invoke another model operation or claim the runner is recovered.
+    if getattr(runner, "_failed", None) is not None:
+        for req_id in binding.request_ids:
+            runner.request_state.requests.pop(req_id, None)
+    else:
+        runner.consume_native_state(scheduler_output)
+    if not owner.closed:
+        owner._release()

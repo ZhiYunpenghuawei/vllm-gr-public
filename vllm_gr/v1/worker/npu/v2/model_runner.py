@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 import torch
@@ -95,11 +96,17 @@ class NPUModelRunnerV2:
         self._decode_advance: tuple[dict[str, int], dict[str, int]] | None = None
         self._closed = False
         self._failed: BaseException | None = None
+        self._weight_update_lock = Lock()
+        self._weight_update_active = False
+        self._owned_graph_registry: Any = None
+        self._graph_generation = 0
         self._initial_free_memory, self._total_memory = torch.npu.mem_get_info(device)
 
     def _require_live(self) -> None:
         if self._closed:
             raise RuntimeError("Owned NPU V2 runner is closed")
+        if getattr(self, "_weight_update_active", False):
+            raise RuntimeError("Owned NPU V2 weight update is in progress")
         if self._failed is not None:
             raise RuntimeError(
                 "Owned NPU V2 runner cannot continue after execution failure"
@@ -672,13 +679,26 @@ class NPUModelRunnerV2:
 
     def shutdown(self) -> None:
         from vllm.v1.worker.utils import clear_layer_kv_caches
+        from vllm_gr.v1.worker.npu.v2.lifecycle import invalidate_owned_graphs
 
         if self._closed:
             return
-        self._closed = True
+        if not self._weight_update_lock.acquire(blocking=False):
+            raise RuntimeError("Cannot close owned NPU V2 during a checkpoint update")
         try:
             torch.npu.synchronize(self.device)
-        finally:
+            invalidate_owned_graphs(self)
+            owner = getattr(self, "_gr_npu_stage_runner", None)
+            if owner is not None and not owner.closed:
+                owner._release()
+            from vllm_gr.v1.worker.model_runner_patch import close_constraint_backend
+
+            close_constraint_backend(self)
+            self._gr_npu_stage_runner = None
+            self._gr_npu_eager_context = None
+            self._gr_npu_graph_context = None
+            self._beam_context = None
+            self._gr_npu_sid_stage_vocab = None
             self.abandon_pending_dispatch()
             self.request_state.requests.clear()
             if self.model is not None:
@@ -694,10 +714,18 @@ class NPUModelRunnerV2:
             self.kv_cache_config = None
             self.model = None
             torch.npu.empty_cache()
+            self._closed = True
+        except BaseException as error:
+            self._failed = error
+            raise
+        finally:
+            self._weight_update_lock.release()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         if overrides:
             raise ValueError("Owned NPU V2 runtime configuration mutation is unsupported")
 
     def reload_weights(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("Owned NPU V2 weight reload requires a drained lifecycle adapter")
+        from vllm_gr.v1.worker.npu.v2.lifecycle import reload_owned_checkpoint
+
+        reload_owned_checkpoint(self, *args, **kwargs)

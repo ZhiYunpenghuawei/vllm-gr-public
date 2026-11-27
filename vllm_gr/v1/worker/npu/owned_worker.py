@@ -244,7 +244,7 @@ class NPUWorker(WorkerBase):
             torch.npu.synchronize(self.device)
 
     def check_health(self) -> None:
-        self._runner()
+        self._runner()._require_live()
 
     def shutdown(self) -> None:
         if self._closed:

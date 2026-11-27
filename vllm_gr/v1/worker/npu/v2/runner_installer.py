@@ -29,6 +29,7 @@ def make_execute(original):
         retirement = gr_execution._dispatch_retirement_frame(self, scheduler_output)
         if retirement is not None:
             return retirement
+        self._require_live()
         stage = gr_execution._dispatch_stage_frame(
             self, scheduler_output, original, *args, **kwargs
         )
@@ -49,7 +50,16 @@ def make_sample(original):
         if owner is not None and (
             owner.pending_plan is not None or owner.execution_error is not None
         ):
-            return owner.sample(grammar_output)
+            try:
+                return owner.sample(grammar_output)
+            except Exception as error:
+                if owner.pending_plan is not None:
+                    owner.failed_execution = owner.pending_plan.execution
+                owner.execution_error = error
+                owner.pending_plan = None
+                owner.logits = None
+                self._failed = error
+                raise
         return original(self, grammar_output)
 
     setattr(sample, contracts._WORKER_V2_SAMPLE_TOKENS_PATCH_MARKER, True)
@@ -60,11 +70,9 @@ def install() -> None:
     from vllm_gr.v1.worker.model_runner_patch import (
         install_worker_utility_hooks,
         make_load_model_with_constraint_backend,
-        make_shutdown_with_constraint_backend,
     )
     from vllm_gr.v1.worker.npu.npu_model_runner_patch import (
         make_patched_load_model,
-        make_patched_shutdown,
     )
     from vllm_gr.v1.worker.npu.owned_worker import NPUWorker
     from vllm_gr.v1.worker.runner_binding import bind_after_model_load
@@ -83,7 +91,7 @@ def install() -> None:
             make_load_model_with_constraint_backend(runner.load_model, max_batch=4)
         )
     )
-    runner.shutdown = make_patched_shutdown(make_shutdown_with_constraint_backend(runner.shutdown))
+    setattr(runner.shutdown, contracts._CONSTRAINT_SHUTDOWN_PATCH_MARKER, True)
     runner.execute_model = make_execute(runner.execute_model)
     runner.sample_tokens = make_sample(runner.sample_tokens)
     install_runner_lifecycle(runner, RUNNER_ID, prepare="prepare_inputs")
