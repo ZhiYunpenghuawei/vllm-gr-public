@@ -57,6 +57,7 @@ class TestCustomAttentionBackendMarker(unittest.TestCase):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         from vllm_gr.engine.arg_utils_gr import create_engine_config
+        from vllm_gr.platforms.table import current_gr_platform
 
         # Ascend clears the native backend during VllmConfig creation.
         fake_config = self._make_fake_config()
@@ -67,12 +68,48 @@ class TestCustomAttentionBackendMarker(unittest.TestCase):
             attention_backend = "CUSTOM"
             attention_config = None
 
-        result = create_engine_config(FakeSelf())
+        # The restore is the non-routing behavior; pin the flag so the
+        # expectation holds on routing platforms (Ascend) as well.
+        with mock.patch.object(
+            type(current_gr_platform()), "routes_attention_backend", False
+        ):
+            result = create_engine_config(FakeSelf())
 
         from vllm_gr.config import GRAttentionBackend, GRConfig
 
         assert GRConfig.from_vllm_config(result).attention_backend is GRAttentionBackend.CUSTOM
         assert result.attention_config.backend == AttentionBackendEnum.CUSTOM
+
+    @mock.patch("vllm_gr.engine.arg_utils_gr.origin_create_engine_config")
+    @pytest.mark.l1
+    def test_routing_platform_keeps_native_backend(self, mock_origin_create):
+        """Routing platforms keep the native backend field untouched.
+
+        Beam selection is resolved by the per-process attention router from
+        the GR marker, so the shared CUSTOM slot is never claimed and the
+        vendor runtime's attention_config.backend value survives as-is.
+        """
+        from vllm_gr.engine.arg_utils_gr import create_engine_config
+        from vllm_gr.platforms.table import current_gr_platform
+
+        # Ascend clears the native backend during VllmConfig creation.
+        fake_config = self._make_fake_config()
+        mock_origin_create.return_value = fake_config
+
+        class FakeSelf:
+            additional_config = {"vllm_gr": {"gr": {}}}
+            attention_backend = "CUSTOM"
+            attention_config = None
+
+        with mock.patch.object(
+            type(current_gr_platform()), "routes_attention_backend", True
+        ):
+            result = create_engine_config(FakeSelf())
+
+        from vllm_gr.config import GRAttentionBackend, GRConfig
+
+        assert GRConfig.from_vllm_config(result).attention_backend is GRAttentionBackend.CUSTOM
+        assert result.attention_config.backend is None
 
     @mock.patch("vllm_gr.engine.arg_utils_gr.origin_create_engine_config")
     def test_attention_config_backend_custom_persists_marker(self, mock_origin_create):
@@ -81,6 +118,7 @@ class TestCustomAttentionBackendMarker(unittest.TestCase):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         from vllm_gr.engine.arg_utils_gr import create_engine_config
+        from vllm_gr.platforms.table import current_gr_platform
 
         fake_config = self._make_fake_config()
         mock_origin_create.return_value = fake_config
@@ -90,7 +128,12 @@ class TestCustomAttentionBackendMarker(unittest.TestCase):
             attention_backend = None
             attention_config = AttentionConfig(backend=AttentionBackendEnum.CUSTOM)
 
-        result = create_engine_config(FakeSelf())
+        # The restore is the non-routing behavior; pin the flag so the
+        # expectation holds on routing platforms (Ascend) as well.
+        with mock.patch.object(
+            type(current_gr_platform()), "routes_attention_backend", False
+        ):
+            result = create_engine_config(FakeSelf())
 
         from vllm_gr.config import GRAttentionBackend, GRConfig
 
@@ -218,6 +261,7 @@ class TestBeamAttentionVllmApiContract(unittest.TestCase):
         assert reasons == []
 
     @pytest.mark.l1
+    @pytest.mark.gpu_test
     def test_cuda_platform_checks_custom_geometry(self):
         import torch
         from vllm.platforms.cuda import CudaPlatform

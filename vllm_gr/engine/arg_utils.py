@@ -129,14 +129,25 @@ def create_engine_config(self, usage_context=None, headless=False):
     write_canonical_gr_config(config, effective_gr_config)
 
     if effective_gr_config.attention_backend is GRAttentionBackend.CUSTOM:
-        attention_config = getattr(config, "attention_config", None)
-        if attention_config is not None and getattr(attention_config, "backend", None) is None:
-            from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        from vllm_gr.platforms.table import current_gr_platform
 
-            attention_config.backend = AttentionBackendEnum.CUSTOM
-        from vllm_gr.v1.attention.selector_patch import prepare_engine_attention
+        if getattr(current_gr_platform(), "routes_attention_backend", False):
+            # Routing platforms keep attention_config at the value the vendor
+            # runtime left it (vllm-ascend clears the explicit backend during
+            # VllmConfig creation); Beam selection is resolved by the
+            # per-process attention router from the GR marker above, so the
+            # shared CUSTOM slot is never claimed and the native backend field
+            # never has to be restored.
+            pass
+        else:
+            attention_config = getattr(config, "attention_config", None)
+            if attention_config is not None and getattr(attention_config, "backend", None) is None:
+                from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        prepare_engine_attention(config)
+                attention_config.backend = AttentionBackendEnum.CUSTOM
+            from vllm_gr.v1.attention.selector_patch import prepare_engine_attention
+
+            prepare_engine_attention(config)
     if effective_gr_config.beam_max_width is not None:
         from vllm_gr.config.execution import validate_gr_execution_config
 

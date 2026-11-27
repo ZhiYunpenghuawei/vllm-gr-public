@@ -56,6 +56,16 @@ def prepare_engine_attention(config: Any) -> None:
     """Claim the process-local slot before a Beam engine constructs its layers."""
     if GRConfig.from_vllm_config(config).attention_backend is not GRAttentionBackend.CUSTOM:
         return
+    from vllm_gr.platforms.table import current_gr_platform
+
+    if getattr(current_gr_platform(), "routes_attention_backend", False):
+        # Routing platforms resolve Beam attention through the per-process
+        # attention router (installed with the runtime patches, before any
+        # native runner resolves its backend). The shared CUSTOM slot stays
+        # untouched by GR and attention_config keeps the vendor runtime's
+        # native value, so there is nothing to register or install at
+        # engine construction time.
+        return
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     if (
@@ -63,7 +73,6 @@ def prepare_engine_attention(config: Any) -> None:
         is not AttentionBackendEnum.CUSTOM
     ):
         raise ValueError("GR CUSTOM attention must be selected before native attention selection")
-    from vllm_gr.platforms.table import current_gr_platform
 
     platform = current_gr_platform()
     if platform.beam_attention_backend is None:
@@ -84,18 +93,25 @@ def clear_attention_backend_cache() -> None:
     native.cache_clear()
 
 
-def install_beam_selector_fallback() -> int:
-    """Resolve CUSTOM (and the native None reset) to the imported Beam class.
+def install_beam_attention_routing() -> int:
+    """Route Beam selection at the shared attention resolution seam.
 
-    Native graph machinery records the runner's attention backend class and
-    branches its replay path on that type (vllm-ascend treats only subclasses
-    of its own backend as updatable-graph capable). If the selector hands the
-    runner a path string, or the native backend after vllm-ascend resets
-    ``attention_config.backend`` to None, FULL decode replays are routed
-    through the updatable-graph machinery, which resolves zero update tasks
-    for Beam metadata and leaves the stream dead. Returning the imported Beam
-    class here keeps the native graph manager on the plain replay path; this
-    mirrors the selector behavior the platform bridge replaced.
+    This is the single Beam selection seam for routing platforms: every
+    native consumer - the ModelRunner's backend resolution and attention
+    layer construction - resolves through the cached selector, so answering
+    the imported Beam class here for GR engines covers them all from one
+    per-process installation that happens before any runner initializes.
+
+    Native graph machinery records the runner's resolved backend class and
+    branches its replay path on that type (vllm-ascend treats only
+    subclasses of its own backend as updatable-graph capable). A native
+    class would route FULL decode replays through the updatable-graph
+    machinery, which resolves zero update tasks for Beam metadata and
+    leaves the stream dead; the Beam class keeps the native graph manager
+    on the plain replay path. The routing condition is the GR configuration
+    marker, so the vendor runtime's attention_config.backend value (vllm-
+    ascend clears it to None during config finalization) never has to
+    survive for Beam selection to hold.
     """
     import vllm.v1.attention.selector as selector_mod
     from vllm.v1.attention.backends.registry import AttentionBackendEnum

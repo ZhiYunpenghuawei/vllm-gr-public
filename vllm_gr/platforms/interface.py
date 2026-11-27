@@ -136,6 +136,15 @@ class GRPlatform(Platform, ABC):
     # resolves Beam selection through the registry, so the beam backend must
     # overwrite that claim instead of rejecting it. Unknown owners still fail.
     bridged_custom_attention_owners: tuple[str, ...] = ()
+    # Platforms that resolve Beam attention through their own early-installed
+    # attention router instead of claiming the shared AttentionBackendEnum
+    # CUSTOM registry slot. Vendor runtimes may squat that slot at import
+    # time and clear attention_config.backend during config finalization,
+    # which makes slot ownership a conflict surface. Routing platforms leave
+    # the shared slot untouched, keep attention_config at the value the
+    # vendor runtime left it, and resolve Beam from the GR configuration
+    # marker, so nothing is registered or installed at engine construction.
+    routes_attention_backend: bool = False
     vendor_distribution: str | None = None
     patch_ids: tuple[str, ...] = ()
 
