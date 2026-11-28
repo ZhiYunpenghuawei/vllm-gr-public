@@ -9,7 +9,6 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
-from vllm_gr.utils.npu_adapter import is_cuda_available
 from vllm_gr.v1.forward_context import fresh_prefill_capture
 from vllm_gr.v1.worker.cuda.v1.prefill_capture_plan import plan_prefill_capture
 from vllm_gr.v1.worker.cudagraph_capture import is_recoverable_capture_error
@@ -66,6 +65,7 @@ class GPUPrefillGraphRunner(BasePrefillGraphRunner):
     """Manages CUDA graph capture and replay on NVIDIA GPUs."""
 
     supports_multi_request_total_buckets = True
+    _is_recoverable_capture_error = staticmethod(is_recoverable_capture_error)
 
     def __init__(
         self,
@@ -111,7 +111,7 @@ class GPUPrefillGraphRunner(BasePrefillGraphRunner):
             )
             return
 
-        if not is_cuda_available():
+        if not torch.cuda.is_available():
             logger.info("CUDA not available; skipping CUDA graph capture for prefill.")
             return
 

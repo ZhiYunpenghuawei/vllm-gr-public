@@ -11,7 +11,7 @@ configuration. Build it with the tokenizer from the model you will serve.
 
 Set `ONEREC_MODEL` to a [local OneRec snapshot](../../README.md#run-onerec-offline).
 In Bash at the repository root, choose an output directory and a device
-backend. On Ascend set `ONEREC_BACKEND=npu`.
+backend (`cuda`).
 
 ```bash
 export ONEREC_WORKDIR="$PWD/results/onerec-serving"
@@ -61,8 +61,7 @@ For a different raw catalog you already have, place it at
 `$ONEREC_WORKDIR/catalog.json` and start at
 [Extract constraint triples from the catalog](#extract-constraint-triples-from-the-catalog).
 
-Use the local snapshot for `ONEREC_MODEL` and set `ONEREC_BACKEND` to
-`npu` on Ascend. See the
+Use the local snapshot for `ONEREC_MODEL` and set `ONEREC_BACKEND` to `cuda`. See the
 [download instructions](../../../docs/user_guide/onerec_quickstart.md#1-check-the-environment)
 if you need the model or mapping.
 

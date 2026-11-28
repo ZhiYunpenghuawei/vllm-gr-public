@@ -158,7 +158,7 @@ def merge_short_suffix_attention(
         and query.dtype in (torch.float16, torch.bfloat16)
         and query.dtype == prefix_output.dtype == output.dtype == pool_key.dtype == pool_value.dtype
     ):
-        # Gluon depends on NVIDIA-specific Triton APIs unavailable on NPU.
+        # Gluon depends on optional NVIDIA-specific Triton APIs.
         from vllm_gr.v1.attention.backends.beam_short_suffix_fa2 import (
             merge_short_suffix_fa2,
         )

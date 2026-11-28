@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Device-free regression coverage for the offline NPU graph example."""
+"""Device-free regression coverage for the offline CUDA Beam example."""
 
 import json
 import os
@@ -25,7 +25,7 @@ def _cli_args(tmp_path: Path) -> list[str]:
         "--prompt",
         str(tmp_path / "prompt.txt"),
         "--constraint-backend",
-        "npu",
+        "cuda",
         "--beam-width",
         "8",
     ]
@@ -34,17 +34,12 @@ def _cli_args(tmp_path: Path) -> list[str]:
 @pytest.mark.parametrize(  # type: ignore[misc]
     "options,message",
     [
-        (["--dynamic-beam-widths", "8,4"], "one width per generated step"),
-        (["--dynamic-beam-widths", "8,4,0"], "each in [1, beam-width]"),
-        (["--dynamic-beam-widths", "8,4,9"], "each in [1, beam-width]"),
-        (["--dynamic-beam-widths", "8,no,2"], "comma-separated integers"),
-        (["--dynamic-beam-widths", "8,4,2", "--result-width", "3"], "last-stage-width"),
-        (["--result-width", "0"], "last-stage-width"),
-        (["--constraint-backend", "cuda", "--dynamic-beam-widths", "8,4,2"], "NPU backend"),
-        (["--constraint-backend", "cuda", "--result-width", "2"], "NPU backend"),
+        (["--constraint-backend", "npu"], "invalid choice"),
+        (["--dynamic-beam-widths", "8,4,2"], "unrecognized arguments"),
+        (["--result-width", "2"], "unrecognized arguments"),
     ],
 )
-def test_dynamic_beam_cli_rejects_invalid_options(
+def test_removed_ascend_cli_options_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -59,7 +54,7 @@ def test_dynamic_beam_cli_rejects_invalid_options(
 
 
 @pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("backend", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("backend", ["cuda"])  # type: ignore[misc]
 @pytest.mark.parametrize("steps", [1, 2])  # type: ignore[misc]
 @pytest.mark.parametrize("mode", [[], ["--cot"]])  # type: ignore[misc]
 def test_constrained_example_rejects_incomplete_sid_at_cli(
@@ -82,14 +77,9 @@ def test_constrained_example_rejects_incomplete_sid_at_cli(
 
 
 @pytest.mark.parametrize("with_catalog", [True, False])  # type: ignore[misc]
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "widths,graph_widths", [([8, 4, 2], [4, 8]), ([2, 4, 8], [2, 4])]
-)
-def test_dynamic_beam_example_wires_graphs_and_benchmark(
+def test_cuda_beam_example_wires_graphs_and_benchmark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    widths: list[int],
-    graph_widths: list[int],
     with_catalog: bool,
 ) -> None:
     output_path = tmp_path / "benchmark.json"
@@ -106,12 +96,6 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
         "argv",
         cli_args
         + [
-            "--dynamic-beam-widths",
-            ",".join(str(width) for width in widths),
-            "--result-width",
-            "2",
-            "--execution",
-            "graph",
             "--batch-size",
             "2",
             "--repeat",
@@ -129,12 +113,11 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
         tokens=[1, 2, 3, 4, 5], cum_logprob=-1.0, finish_reason="length", stop_reason=None
     )
     outputs = [SimpleNamespace(sequences=[sequence, sequence]) for _ in range(2)]
-    stats = {"captured_shapes": [[2, width] for width in graph_widths], "full_dispatches": 2}
 
     def beam_search(prompts: list[Any], params: Any, *, output_mode: str) -> list[Any]:
         assert output_mode == "full"
         assert len(prompts) == 2
-        assert params.dynamic_beam_widths == widths and params.result_width == 2
+        assert params.beam_width == 8
         return outputs
 
     def encode(text: str, *, add_special_tokens: bool) -> list[int]:
@@ -147,7 +130,6 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
     llm = SimpleNamespace(
         get_tokenizer=lambda: SimpleNamespace(encode=encode, convert_ids_to_tokens=lambda ids: ids),
         beam_search=beam_search,
-        collective_rpc=lambda name: [stats],
     )
 
     def make_llm(**kwargs: Any) -> Any:
@@ -183,12 +165,10 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
     example.run(args, artifact_path if with_catalog else None)
 
     assert params_kwargs["beam_width"] == 8
-    assert params_kwargs["dynamic_beam_widths"] == widths
-    assert params_kwargs["result_width"] == 2
     config = engine_kwargs["gr"]
     assert config["beam_width"] == config["candidate_width"] == [8, 8, 8]
-    assert config["decode_graph_widths"] == graph_widths
-    assert config["decode_graph_batch_size"] == 2
+    assert config["beam_batch_sizes"] == [1, 2]
+    assert config["beam_graph_enabled"] is True
     report = json.loads(output_path.read_text())
     assert config["constraint_mode"] == ("table" if with_catalog else "none")
     if with_catalog:
@@ -200,88 +180,7 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
         assert config["constraint_table"] is None
         assert report["catalog"] is None
         assert report["prompt"] is None
-    assert report["dynamic_beam_widths"] == widths and report["result_width"] == 2
     assert report["runs"][0]["returned_beams"] == 4
-    assert report["npu_beam_graph"] == stats
-
-
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "steps,captured,dispatches,fails",
-    [
-        (1, True, 0, False),
-        (1, False, 0, False),
-        (2, True, 1, False),
-        (3, True, 2, False),
-        (2, True, 0, True),
-        (2, False, 1, True),
-    ],
-)
-def test_npu_graph_example_requires_replay_only_for_decode(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    steps: int,
-    captured: bool,
-    dispatches: int,
-    fails: bool,
-) -> None:
-    import sys
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "example",
-            "--model",
-            str(tmp_path),
-            "--catalog",
-            str(tmp_path / "catalog.json"),
-            "--prompt",
-            str(tmp_path / "prompt.txt"),
-            "--constraint-backend",
-            "npu",
-            "--execution",
-            "graph",
-            "--batch-size",
-            "2",
-        ],
-    )
-    args = example.parse_args()
-    # Test replay accounting with synthetic outputs independently of SID CLI admission.
-    args.generated_steps = steps
-    sequence = SimpleNamespace(
-        tokens=[1, 2, 3, 4, 5], cum_logprob=-1.0, finish_reason="length", stop_reason=None
-    )
-    outputs = [SimpleNamespace(sequences=[sequence]) for _ in range(args.batch_size)]
-    stats = {"captured_shapes": [[2, 128]] if captured else [], "full_dispatches": dispatches}
-    llm = SimpleNamespace(
-        get_tokenizer=lambda: SimpleNamespace(convert_ids_to_tokens=lambda ids: ids),
-        beam_search=lambda prompts, params, *, output_mode: outputs,
-        collective_rpc=lambda name: [stats],
-    )
-    modules: dict[str, dict[str, Any]] = {
-        "vllm.inputs": {"tokens_input": lambda ids, **kw: dict(prompt_token_ids=ids, **kw)},
-        "vllm_gr.entrypoints.gr": {"GRLLM": lambda **kw: nullcontext(llm)},
-        "vllm_gr.sampling_params": {"BeamSearchParams": lambda **kw: SimpleNamespace(**kw)},
-    }
-    for name, attributes in modules.items():
-        module = ModuleType(name)
-        module.__dict__.update(attributes)
-        monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm_gr.constraints.artifact_builder",
-        SimpleNamespace(build_single_trie_artifact=lambda *args: ("artifact", "tokenizer")),
-    )
-    monkeypatch.setattr(example, "make_prompt", lambda *args: [11, 12])
-    if fails:
-        with pytest.raises(RuntimeError, match="capture/replay was not observed"):
-            example.run(args, tmp_path / "unused.safetensors")
-    else:
-        example.run(args, tmp_path / "unused.safetensors")
-        output = capsys.readouterr().out
-        assert '"npu_beam_graph"' in output
-        assert "request=0 returned_beams=1" in output and "request=1 returned_beams=1" in output
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -290,8 +189,6 @@ def test_npu_graph_example_requires_replay_only_for_decode(
         ("cuda", None, "1"),
         ("cuda", "", "1"),
         ("cuda", "0", "0"),
-        ("npu", None, "0"),
-        ("npu", "1", "0"),
     ],
 )
 def test_offline_example_selects_model_runner(

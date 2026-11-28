@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -63,7 +63,6 @@ class BeamAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     causal: bool = True
-    npu_causal_atten_mask: torch.Tensor | None = None
 
     # Standard Requests batch routing
     std_indices: torch.Tensor | None = None
@@ -120,10 +119,6 @@ class BeamAttentionMetadata:
     # fields (query_start_loc, seq_lens, block_table, slot_mapping); all the
     # grouped std_*/prefix_*/suffix_* fields stay None and must not be read.
     is_prefill_graph_exec: bool = False
-    # Only dedicated padded captures use BSND; live/native metadata stays TND.
-    prefill_fia_layout: str = "TND"
-    # Graph-owned scratch, never shared across independent model runners.
-    bsnd_resources: dict = field(default_factory=dict)
     num_reqs: int = 0
     query_start_loc_cpu: list | None = None
     seq_lens_cpu: list | None = None
@@ -140,9 +135,6 @@ class BeamAttentionMetadata:
     beam_layer_idx: int = 0
     beam_pool_slots: list[int] | None = None  # Per-request slot IDs in the Beam partition.
     incremental_suffix_kv_len: int = 0  # decode_step + 1
-    # Host proof that the current NPU batch routes every row in order. Graph
-    # dispatch must preserve this layout: replay does not re-run Python guards.
-    npu_prefix_rows_are_identity: bool = False
     prefix_policy: str = DEFAULT_DEPLOYMENT.prefix_policy
     prefix_min_chain_us: float = DEFAULT_DEPLOYMENT.prefix_min_chain_us
     prefix_calibrations: dict | None = None
@@ -301,9 +293,8 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         device_type = getattr(device, "type", str(device).partition(":")[0])
         self._is_cuda = device_type == "cuda"
-        self._is_npu = device_type == "npu"
         # Default: no pre-allocated fixed-address buffers.  Overridden to True
-        # below when CUDA (or, in the future, ACL Graph on NPU) needs them.
+        # below when CUDA needs them.
         # Tests / kernel harnesses that skip __init__ keep the default and
         # allocate device tensors per build() call.
         self._fixed_buffers = False
@@ -344,18 +335,11 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
 
         self.aot_sliding_window: tuple[int, int] | None = None
 
-        if self._is_npu:
-            self.npu_causal_atten_mask = (
-                torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
-            )
-        else:
-            self.npu_causal_atten_mask = None
-
         # --- Fixed-address metadata buffers for graph capture compatibility ---
-        # CUDA and NPU pre-allocate maximum-sized buffers so build() can return
+        # CUDA pre-allocates maximum-sized buffers so build() can return
         # address-stable views for graph replay.  Thread the buffers through a
         # BeamTensorContext instead of reading them individually in build().
-        self._fixed_buffers = self._is_cuda or self._is_npu
+        self._fixed_buffers = self._is_cuda
         self._tensor_buffers = BeamTensorBuffers()
         if self._fixed_buffers:
             max_beams = GRConfig.from_vllm_config(vllm_config).beam_max_width
@@ -403,7 +387,6 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
             block_size=self.block_size,
             fixed_buffers=getattr(self, "_fixed_buffers", False),
             is_cuda=getattr(self, "_is_cuda", False),
-            is_npu=getattr(self, "_is_npu", False),
             cache=self._geometry_cache(),
             buffers=(getattr(self, "_tensor_buffers", None) or BeamTensorBuffers()),
             num_heads_q=getattr(self, "num_heads_q", 0),
@@ -591,7 +574,6 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
                     block_table=common_attn_metadata.block_table_tensor,
                     slot_mapping=common_attn_metadata.slot_mapping,
                     causal=True,
-                    npu_causal_atten_mask=self.npu_causal_atten_mask,
                     is_prefill_graph_exec=True,
                     num_reqs=common_attn_metadata.num_reqs,
                     num_heads=self.num_heads_q,
@@ -720,18 +702,6 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
             # In incremental decode, suffix KV length = decode_step + 1
             incremental_suffix_kv_len = beam_decode_step_list[0] + 1
 
-        # Use the current CPU routing, including geometry-hit q_start updates.
-        # Counts or contiguity alone do not prove a zero-based identity range.
-        npu_prefix_rows_are_identity = (
-            getattr(self, "_is_npu", False)
-            and is_incremental
-            and not std_indices
-            and len(prefix_indices) > 0
-            and len(prefix_indices) == common_attn_metadata.num_actual_tokens
-            and len(prefix_indices) == getattr(beam_session, "attention_width", 0)
-            and all(index == row for row, index in enumerate(prefix_indices))
-        )
-
         deployment = GRConfig.from_vllm_config(self.vllm_config).deployment
         meta = BeamAttentionMetadata(
             explicit_fa_version=configured_fa_version(self.vllm_config),
@@ -746,7 +716,6 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             causal=common_attn_metadata.causal,
-            npu_causal_atten_mask=getattr(self, "npu_causal_atten_mask", None),
             std_indices=std_indices_tensor,
             std_cu_seqlens_q_device=std_cu_seqlens_q_device,
             std_seqlens_kv_device=std_seqlens_kv_device,
@@ -786,7 +755,6 @@ class BeamAttentionMetadataBuilder(AttentionMetadataBuilder[BeamAttentionMetadat
             num_kv_heads=self.num_kv_heads,
             # Incremental decode fields
             is_beam_decode=is_incremental,
-            npu_prefix_rows_are_identity=npu_prefix_rows_are_identity,
             beam_session=beam_session,
             beam_pool_slots=beam_pool_slots,
             incremental_suffix_kv_len=incremental_suffix_kv_len,

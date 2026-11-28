@@ -48,72 +48,9 @@ class ModelRunnerAdapter(Protocol):
 
 
 class BeamAttentionExecution(Protocol):
-    """Platform-specific Beam Attention execution primitives."""
+    """Availability contract for a platform-owned Beam Attention executor."""
 
     def is_available(self) -> bool: ...
-
-    def get_flash_attn_version(
-        self,
-        *,
-        requires_alibi: bool = False,
-        head_size: int | None = None,
-    ) -> int | None: ...
-
-    def supports_sinks(self) -> bool: ...
-
-    def reshape_and_cache(
-        self,
-        key: Any,
-        value: Any,
-        key_cache: Any,
-        value_cache: Any,
-        slot_mapping: Any,
-        kv_cache_dtype: str,
-        k_scale: Any,
-        v_scale: Any,
-    ) -> None: ...
-
-    def cache_unshared_kv(
-        self,
-        unshared_key: Any,
-        unshared_value: Any,
-        curr_key: Any,
-        curr_value: Any,
-        slot: int,
-        decode_step: int,
-        beam_session: Any = None,
-    ) -> None: ...
-
-    def prefill_attention(
-        self,
-        output: Any,
-        query: Any,
-        key_cache: Any,
-        value_cache: Any,
-        attn_metadata: Any,
-        sliding_window_size: list[int] | tuple[int, int] | None,
-        scale: float,
-        logits_soft_cap: float,
-        vllm_flash_attn_version: int,
-        s_aux: Any = None,
-        alibi_slopes: Any = None,
-    ) -> None: ...
-
-    def cascade_attention(
-        self,
-        output: Any,
-        query: Any,
-        key_cache: Any,
-        value_cache: Any,
-        attn_metadata: Any,
-        sliding_window_size: list[int] | tuple[int, int] | None,
-        scale: float,
-        logits_soft_cap: float,
-        vllm_flash_attn_version: int,
-        s_aux: Any = None,
-        alibi_slopes: Any = None,
-        beam_pool: Any = None,  # Per-layer pool (GPU incremental decode only)
-    ) -> None: ...
 
 
 class GRPlatform(Platform, ABC):
@@ -142,29 +79,25 @@ class GRPlatform(Platform, ABC):
         """The single Beam attention selection seam.
 
         vLLM's cached selector reaches the platform lazily on every backend
-        resolution, so answering the Beam backend path here covers every
+        resolution, so a platform answering its Beam backend path here covers every
         native consumer - the ModelRunner's backend resolution and attention
         layer construction - from one seam that exists from class
         definition. The shared AttentionBackendEnum.CUSTOM registry slot is
-        never claimed (vendor runtimes may squat it at import time and clear
-        ``attention_config.backend`` during config finalization), nothing is
-        installed at engine construction, and ``attention_config`` keeps the
-        value the vendor runtime left it: the Beam intent travels in the GR
-        configuration marker alone.
+        never claimed. Nothing is installed at engine construction, and
+        ``attention_config`` keeps the value selected by the native platform:
+        the Beam intent travels in the GR configuration marker alone.
 
         The platform-method contract is a dotted class path; the selector
-        imports it. The resolved class (not an AscendAttentionBackend
-        subclass) also keeps vllm-ascend's graph manager on the plain replay
-        path: ``use_updatable_graph`` is False for it, and the
-        updatable-graph machinery cannot resolve update tasks for Beam
-        metadata.
+        imports it. A platform must override this method to supply its own
+        Beam attention backend; the base rejects GR Beam selection rather than
+        silently choosing a different device's implementation.
         """
         from vllm_gr.v1.attention.selector_patch import _gr_attention_is_custom
 
         if _gr_attention_is_custom():
-            from vllm_gr.v1.attention.selector_patch import _BEAM_BACKEND_PATH
-
-            return _BEAM_BACKEND_PATH
+            raise NotImplementedError(
+                f"GR platform {cls.backend_id!r} has no Beam attention backend"
+            )
         return super().get_attn_backend_cls(
             selected_backend,
             attn_selector_config=attn_selector_config,
@@ -194,6 +127,9 @@ class GRPlatform(Platform, ABC):
 
     def apply_runtime_patches(self, *, force: bool = False) -> int:
         return 0
+
+    def release_accelerator_memory(self) -> None:
+        """Best-effort release of the selected platform's process resources."""
 
     def get_model_runner_hooks(self) -> ModelRunnerInstaller:
         raise NotImplementedError(f"{self.backend_id} has no GR ModelRunner installer")
@@ -225,6 +161,16 @@ class GRPlatform(Platform, ABC):
                 f"Backend {self.backend_id!r} attention implementation is unavailable"
             )
         return execution
+
+    def validate_constraint_backend(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_rows: int,
+        max_top_k: int,
+    ) -> None:
+        """Validate the requested table capacity and placement before artifact I/O."""
 
     def create_constraint_backend(
         self,

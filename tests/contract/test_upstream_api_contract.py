@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 from collections.abc import Callable, Sequence
 
@@ -18,12 +17,7 @@ def _innermost(target: Callable[..., object]) -> Callable[..., object]:
 
     ``inspect.unwrap`` only follows ``__wrapped__``, which well-behaved wrappers
     set via ``functools.wraps``. Some third-party wrappers installed at import
-    time do not: vllm-ascend's profiling-chunk patch replaces
-    ``EngineCore.__init__`` with a plain closing function
-    (``def _patched_engine_core_init(self, *args, **kwargs)``) that only closes
-    over ``original_init``. Importing ``vllm.entrypoints.launchers.cli_args``
-    installs it as a module-level side effect, so whether these contract checks
-    see the upstream signature depends on what ran earlier in the process.
+    time do not, and instead only close over the original callable.
     Resolve that shape too, so the contract stays order-independent and still
     describes the upstream API vllm-gr patches.
     """
@@ -138,39 +132,6 @@ def test_sampling_patch_covers_both_openai_prompt_shapes(monkeypatch) -> None:
 
     assert ChatCompletionRequest.to_beam_search_params is to_beam_search_params
     assert CompletionRequest.to_beam_search_params is to_beam_search_params
-
-
-@pytest.mark.npu_test  # type: ignore[misc]
-def test_vllm_ascend_model_runner_patch_contract() -> None:
-    if importlib.util.find_spec("vllm_ascend") is None:
-        pytest.skip("vllm-ascend is not installed")
-
-    # Import through the worker entry point so vllm-ascend initializes its ops
-    # package before loading model_runner_v1. A direct model_runner_v1 import
-    # can otherwise enter the device_op/ops circular-import path.
-    from vllm_ascend.worker.worker import NPUModelRunner, NPUWorker
-
-    _assert_parameter_prefix(NPUWorker.init_device, ("self",))
-    _assert_parameter_prefix(
-        NPUModelRunner.execute_model,
-        ("self", "scheduler_output", "intermediate_tensors"),
-    )
-    _assert_parameter_prefix(
-        NPUModelRunner._prepare_inputs,
-        ("self", "scheduler_output", "num_scheduled_tokens"),
-    )
-    _assert_parameter_prefix(
-        NPUModelRunner._bookkeeping_sync,
-        (
-            "self",
-            "scheduler_output",
-            "sampler_output",
-            "logits",
-            "hidden_states",
-            "num_scheduled_tokens",
-            "spec_decode_metadata",
-        ),
-    )
 
 
 pytestmark = pytest.mark.cpu_test

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Cross-device native ModelRunner V1 execute wrapper.
 
-NPU input remapping and sampler bookkeeping live in their dedicated helper
+Device-specific input preparation and sampler bookkeeping live in their dedicated helper
 modules. Configuration/context, GC coordination, dispatch and installation
 contracts have separate owners; native V2 does not depend on this module.
 """
@@ -24,7 +24,7 @@ def make_patched_execute_model(
 ) -> Callable[..., Any]:
     """Wrap execute_model to publish beam-request context for the run.
 
-    Shared by GPU and NPU runners.
+    Shared by native runners.
     """
     if getattr(_orig_execute_model, contracts._WORKER_EXECUTE_PATCH_MARKER, False):
         return _orig_execute_model

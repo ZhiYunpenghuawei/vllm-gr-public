@@ -9,7 +9,7 @@ with the [common benchmark setup](common.md) before running either workload.
 Follow the [common setup](common.md#prerequisites) through
 [writing the YAML](../../examples/online_serving/catalog/README.md#write-the-server-configuration).
 Use the same tokenizer for the compiled table and evaluation. The generated
-`gr.constraint_table.backend` must match the device (`cuda` or `npu`).
+`gr.constraint_table.backend` must match the device (`cuda` for the built-in CUDA backend).
 The command below selects ModelRunner V1 on both devices.
 
 Set `--n` to the maximum value in `gr.beam_width`. For the video task, the
@@ -35,7 +35,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 python -m benchmarks.open_one_rec.one_rec_acc_test \
 Start the server as described in [common benchmark setup](common.md#online-server-mode).
 The accuracy client uses `--model` both as the API model name and to load the
 tokenizer, so use the same accessible model ID or snapshot path on both sides.
-Use the same client command for CUDA and Ascend servers.
+Use the client command for CUDA servers.
 
 From a second terminal, run the client.
 

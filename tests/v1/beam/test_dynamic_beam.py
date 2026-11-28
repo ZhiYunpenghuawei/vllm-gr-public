@@ -1,7 +1,7 @@
 # mypy: disable-error-code="no-untyped-def,no-untyped-call"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Independent selection and KV ownership checks shared by both platforms."""
+"""Independent selection and KV ownership checks."""
 
 from types import SimpleNamespace
 
@@ -13,7 +13,6 @@ from vllm_gr.v1.beam.attention_pool import BeamAttentionPool
 from vllm_gr.v1.beam.dynamic_width import (
     DynamicBeamState,
     get_stage_pools,
-    initialize_packed_stage_pools,
     prune_stage_pools,
     reorder_stage_kv,
 )
@@ -29,6 +28,31 @@ def context(batch, device):
             for _ in range(2)
         ],
     )
+
+
+@pytest.mark.l1
+def test_stage_reorder_preserves_inactive_rows_and_unwritten_history():
+    ctx = context(4, "cpu")
+    bank = get_stage_pools(ctx, 3)
+    snapshots = []
+    for pool in bank:
+        pool.unshared_key.copy_(
+            torch.arange(pool.unshared_key.numel(), dtype=torch.float16).reshape_as(
+                pool.unshared_key
+            )
+        )
+        pool.unshared_value.copy_(-pool.unshared_key)
+        snapshots.append((pool.unshared_key.clone(), pool.unshared_value.clone()))
+    parents = torch.tensor([[2, 0, 2], [1, 1, 0]])
+    reorder_stage_kv(ctx, 3, 3, parents, history_steps=2)
+    for pool, before in zip(bank, snapshots):
+        for actual, original in zip((pool.unshared_key, pool.unshared_value), before):
+            for row in range(2):
+                torch.testing.assert_close(
+                    actual[row, :, :, :2], original[row, parents[row], :, :2]
+                )
+            torch.testing.assert_close(actual[2:], original[2:])
+            torch.testing.assert_close(actual[:, :, :, 2:], original[:, :, :, 2:])
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu_test)])
@@ -66,80 +90,23 @@ def test_request_local_kv_fanout(device, batch, source, target):
                 )
 
 
-def packed_context(batch):
-    """An idle context whose pools are laid out as one packed width bank."""
-    return SimpleNamespace(
-        max_batch=batch,
-        max_beams=4,
-        max_decode_steps=3,
-        registry=SimpleNamespace(num_active_sessions=0),
-        pools=[
-            BeamAttentionPool(batch, 4, 1, 3, 8, torch.device("cpu"), torch.float16)
-            for _ in range(2)
-        ],
-    )
-
-
-def fill_packed_bank(ctx, width):
-    # Layer offsets stay inside FP16 range so copies can be compared exactly.
-    for layer, pool in enumerate(get_stage_pools(ctx, width)):
-        pool.unshared_key.copy_(
-            torch.arange(pool.unshared_key.numel(), dtype=torch.float16).reshape_as(
-                pool.unshared_key
-            )
-            + layer * 1000
-        )
-        pool.unshared_value.copy_(-pool.unshared_key)
-
-
-@pytest.mark.parametrize(
-    "max_batch,batch,source,target",
-    [(4, 2, 4, 2), (4, 4, 2, 4), (4, 4, 3, 3), (3, 2, 1, 3)],
-)
-def test_packed_reorder_matches_parent_gather(max_batch, batch, source, target):
-    """NPU packed banks take separate code paths from the per-pool gather."""
-    ctx = packed_context(max_batch)
-    initialize_packed_stage_pools(ctx)
-    fill_packed_bank(ctx, source)
-    before = [
-        (pool.unshared_key.clone(), pool.unshared_value.clone())
-        for pool in get_stage_pools(ctx, source)
-    ]
-    parents = torch.tensor([[(source - 1), 0, (source - 1), 0][:target]] * batch)
-    reorder_stage_kv(ctx, source, target, parents, 2)
-    for layer, pool in enumerate(get_stage_pools(ctx, target)):
-        for b in range(batch):
-            for child, parent in enumerate(parents[b].tolist()):
-                torch.testing.assert_close(
-                    pool.unshared_key[b, child, :, :2],
-                    before[layer][0][b, parent, :, :2],
-                    rtol=0,
-                    atol=0,
-                )
-                torch.testing.assert_close(
-                    pool.unshared_value[b, child, :, :2],
-                    before[layer][1][b, parent, :, :2],
-                    rtol=0,
-                    atol=0,
-                )
-
-
-def test_packed_bank_pruning_releases_only_uncaptured_widths():
-    ctx = packed_context(2)
-    initialize_packed_stage_pools(ctx)
-    get_stage_pools(ctx, 2)
+def test_stage_pool_pruning_releases_only_uncaptured_widths():
+    ctx = context(2, "cpu")
+    ctx.registry = SimpleNamespace(num_active_sessions=0)
+    capacity_pool = get_stage_pools(ctx, 4)
+    retained_pool = get_stage_pools(ctx, 2)
     get_stage_pools(ctx, 3)
     assert prune_stage_pools(ctx, (2,)) == (3,)
-    assert set(ctx._npu_beam_width_pools) == {2}
-    # The capacity bank is never released by pruning.
-    assert set(ctx._npu_packed_width_pools) == {2, 4}
+    assert get_stage_pools(ctx, 4) is capacity_pool
+    assert get_stage_pools(ctx, 2) is retained_pool
+    assert set(ctx._beam_width_pools) == {2}
 
 
-def test_packed_initialization_rejects_active_sessions():
-    ctx = packed_context(2)
-    ctx.registry.num_active_sessions = 1
+def test_pool_pruning_rejects_active_sessions():
+    ctx = context(2, "cpu")
+    ctx.registry = SimpleNamespace(num_active_sessions=1)
     with pytest.raises(RuntimeError, match="active"):
-        initialize_packed_stage_pools(ctx)
+        prune_stage_pools(ctx, ())
 
 
 def test_widening_keeps_multiple_winners_from_one_parent():

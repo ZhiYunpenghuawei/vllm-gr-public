@@ -169,7 +169,6 @@ original per-prompt route. Separate HTTP requests are never collected here.
 
 Use strictly increasing integers from 1 to 8. To serve a listed batch, set
 `max_num_seqs` at least that high and allow enough tokens for its prompts.
-NPU Decode retains its separate exact-batch graph setting.
 
 These settings take effect at startup, not per HTTP request. Wider capture
 sets increase startup cost and graph memory. Persistent workspace capacity

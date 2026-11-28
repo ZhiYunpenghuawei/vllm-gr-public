@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""GPU implementation of the ``cache_unshared_kv`` operator.
+"""Portable Torch implementation of the ``cache_unshared_kv`` operator.
 
-The cache layout follows xllm-ops:
+The cache layout is:
 
 * key/value cache: ``[num_blocks, beam, num_heads, max_decode_steps, head_dim]``
 * current key/value: ``[batch * beam, num_heads, head_dim]``
@@ -10,7 +10,7 @@ The cache layout follows xllm-ops:
 * decode step: one-element, 1-based integer tensor
 
 The implementation updates the two cache tensors in place and returns them,
-matching the NPU operator contract.
+preserving the existing operator contract.
 """
 
 from __future__ import annotations

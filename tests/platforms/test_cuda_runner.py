@@ -111,8 +111,8 @@ def test_watermark_override_selects_v2_with_the_v1_environment(
         # Upstream VllmConfig semantics under test: a watermark forces
         # ModelRunner V2 even with VLLM_USE_V2_MODEL_RUNNER=0. Declared
         # inline instead of binding VllmConfig.use_v2_model_runner, which
-        # vllm-ascend replaces with an env-only implementation when the
-        # Ascend platform activates; earlier tests trigger that activation,
+        # Native platform plugins may replace this with an env-only implementation;
+        # earlier tests trigger platform activation,
         # which made this cpu-tier test host- and order-dependent.
         @property
         def use_v2_model_runner(self) -> bool:

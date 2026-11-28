@@ -4,8 +4,7 @@
 """Resolve candidate runtime declarations before creating the CI environment.
 
 Resolution uses only the standard library and Git; it must not import setup.py,
-GR, torch, or vLLM from a previously cached environment. NPU runners must supply
-the vendor runtime in the selected base Python; this tool does not install it.
+GR, torch, or vLLM from a previously cached environment.
 Installed GR version comparison uses packaging after environment preparation.
 """
 
@@ -30,8 +29,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 GUARDS = {
     "vllm": "SUPPORTED_VLLM_VERSION",
-    "vllm-ascend": "SUPPORTED_VLLM_ASCEND_VERSION",
-    "triton-ascend": "SUPPORTED_TRITON_ASCEND_VERSION",
 }
 
 
@@ -70,10 +67,12 @@ def literal(path: Path, name: str) -> str:
 
 
 def declarations(repo: Path, device: str) -> dict[str, str]:
-    packages = tuple(GUARDS) if device == "npu" else ("vllm",)
+    if device not in {"gpu", "cuda"}:
+        raise ValueError(f"Unsupported CI runtime device: {device}")
+    packages = ("vllm",)
     guard_source = repo / "vllm_gr/platforms/compat.py"
     prefix = ""
-    if not (repo / "vllm_gr/platforms/ascend/environment.py").is_file():
+    if not guard_source.is_file() or GUARDS["vllm"] not in guard_source.read_text(encoding="utf-8"):
         # Earlier A/B baselines may have provider compatibility code but
         # still declare their built-in version pins in _env_check.py.
         guard_source = repo / "vllm_gr/_env_check.py"
@@ -93,8 +92,6 @@ def declarations(repo: Path, device: str) -> dict[str, str]:
         raise ValueError("vLLM guard, CUDA pin, GR base and SCM fallback versions must agree")
     _check_version_fallback(repo, base)
     expected = {"vllm": base, "vllm-gr": package_version(repo, base)}
-    if device == "npu":
-        expected.update({key: guards[key] for key in ("vllm-ascend", "triton-ascend")})
     return expected
 
 
@@ -212,7 +209,6 @@ def source_digest(repo: Path) -> str:
         "pyproject.toml",
         "vllm_gr/_env_check.py",
         "vllm_gr/platforms/compat.py",
-        "vllm_gr/platforms/ascend/environment.py",
         "vllm_gr/version.py",
         "tools/ci/resolve_runtime.py",
         "tools/packaging/git_version.py",
@@ -267,9 +263,7 @@ def check_versions(expected: dict[str, str], installed: dict[str, str]) -> list[
                     return observed.public == wanted.public
                 # The source identity includes the commit. The wheel may
                 # append its build target to that same local version.
-                return observed == wanted or any(
-                    observed == Version(f"{wanted}.{device}") for device in ("cpu", "npu")
-                )
+                return observed == wanted or observed == Version(f"{wanted}.cpu")
             except InvalidVersion:
                 return False
         return actual.partition("+")[0] == expected_version
@@ -293,18 +287,6 @@ def resolve(repo: Path, device: str) -> dict[str, Any]:
         "architecture": platform.machine(),
         "dependency_sha256": source_digest(repo),
     }
-    if device == "npu":
-        # Inherited packages are part of the cache identity, not an implicit
-        # dependency on whichever vendor image happens to host a later job.
-        spec["base_packages"] = inventory()
-        required = {
-            name: version for name, version in spec["expected"].items() if name != "vllm-gr"
-        }
-        errors = check_versions(required, spec["base_packages"])
-        if "torch-npu" not in spec["base_packages"]:
-            errors.append("the NPU base Python must provide torch-npu")
-        if errors:
-            raise ValueError("NPU runner image is not ready: " + "; ".join(errors))
     spec["cache_key"] = (
         f"gr-runtime-v1-{device}-{spec['os']}-{spec['architecture']}"
         f"-py{spec['python']}-vllm{spec['expected']['vllm']}-{digest(spec)}"
@@ -357,14 +339,11 @@ def verify(repo: Path, spec: dict[str, Any], venv: Path) -> dict[str, Any]:
     errors.extend(check_versions(spec["expected"], installed))
     report["distributions"] = {
         name: str(metadata.distribution(name).locate_file(""))
-        for name in (*spec["expected"], "torch", "triton", "torch-npu")
+        for name in (*spec["expected"], "torch", "triton")
         if name in installed
     }
     modules = ["vllm_gr", "vllm", "torch", "triton"]
     prefixes = [venv]
-    if spec["device"] == "npu":
-        prefixes.append(Path(sys.base_prefix).resolve())
-        modules.extend(["vllm_ascend", "torch_npu"])
     # Fail before importing an unsupported runtime, while still saving versions.
     if not errors:
         for name in modules:
@@ -396,17 +375,10 @@ def verify(repo: Path, spec: dict[str, Any], venv: Path) -> dict[str, Any]:
                 errors.append(f"cannot import {name}: {exc}")
         if not errors:
             try:
-                if spec["device"] == "npu":
-                    ascend_guard = "vllm_gr.platforms.ascend.environment"
-                    if not (repo / "vllm_gr/platforms/ascend/environment.py").is_file():
-                        ascend_guard = "vllm_gr._env_check"
-                    guard = importlib.import_module(ascend_guard)
-                    report["ascend"] = guard.check_ascend_environment(require_npu_platform=True)
-                else:
-                    platforms = importlib.import_module("vllm.platforms")
-                    report["platform"] = str(platforms.current_platform.device_type)
-                    if report["platform"] != "cuda":
-                        errors.append(f"expected CUDA platform, found {report['platform']}")
+                platforms = importlib.import_module("vllm.platforms")
+                report["platform"] = str(platforms.current_platform.device_type)
+                if report["platform"] != "cuda":
+                    errors.append(f"expected CUDA platform, found {report['platform']}")
                 torch = importlib.import_module("torch")
                 report["torch_cuda"] = torch.version.cuda
             except Exception as exc:  # noqa: BLE001 - archive vendor platform initialization failures
@@ -429,7 +401,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("resolve", "verify"))
     parser.add_argument("--repo", type=Path, default=ROOT)
-    parser.add_argument("--device", choices=("gpu", "cuda", "npu"))
+    parser.add_argument("--device", choices=("gpu", "cuda"))
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--venv", type=Path)
     parser.add_argument("--output", type=Path, required=True)

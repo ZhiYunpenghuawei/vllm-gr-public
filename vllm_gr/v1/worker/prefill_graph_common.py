@@ -17,7 +17,6 @@ from vllm_gr.config.models import (
     DEFAULT_PREFILL_TOKEN_BUCKETS,
     deployment_for,
 )
-from vllm_gr.v1.worker.cudagraph_capture import is_recoverable_capture_error
 
 logger = init_logger(__name__)
 
@@ -44,17 +43,12 @@ PREFILL_GRAPH_CAPTURE_NUM_REQS = DEFAULT_BEAM_BATCH_SIZES
 # See docs/design/feature/cuda_prefill_graph.md for the capture and replay contract.
 SMALL_PREFILL_BUCKETS = (1, 16)
 DEFAULT_PREFILL_BUCKETS = list(DEFAULT_PREFILL_TOKEN_BUCKETS)
-# Public compatibility alias. Both platforms use the configured bucket range.
-NPU_DEFAULT_PREFILL_BUCKETS = list(DEFAULT_PREFILL_BUCKETS)
-
-# Backend capability range. This is separate from the capture configuration:
-# NPU can rebind request counts on one graph, while GPU captures the exact
-# request counts declared by PREFILL_GRAPH_CAPTURE_NUM_REQS above.
+# Backend capability range, independent of capture configuration.
 SUPPORTED_NUM_REQS = tuple(range(1, 9))
 
 
 def get_default_buckets(vllm_config: object | None = None) -> list[int]:
-    """Build the configured prefill graph buckets for either platform.
+    """Build the configured prefill graph buckets.
 
     The small exact buckets are added only when the KV-bound override is set:
     they serve cache-hit tails, whose KV length is the whole context, so
@@ -77,8 +71,7 @@ def get_prefill_graph_capture_num_reqs(vllm_config: object | None = None) -> tup
 def get_max_context_len(runner: Any) -> int:
     """Maximum supported per-request KV length from the model config.
 
-    Used to size static graph bounds (NPU FIA workspace, GPU flash-attention
-    max_seqlen_k) so replays with large cached/chunked-prefill contexts stay
+    Used to size static graph bounds so replays with large cached-prefill contexts stay
     within the capture-time budgets. 0 when the config is unavailable.
     """
     model_config = getattr(runner, "model_config", None)
@@ -112,13 +105,6 @@ def _get_block_table_cols(runner: Any) -> int | None:
     return int((max_model_len + block_size - 1) // block_size)
 
 
-def is_npu_platform() -> bool:
-    """Return True when the active vLLM platform is Ascend NPU."""
-    from vllm.platforms import current_platform
-
-    return str(current_platform.device_type).lower() == "npu"
-
-
 def is_prefill_graph_enabled(runner: Any = None) -> bool:
     return deployment_for(getattr(runner, "vllm_config", None)).prefill_graph_enabled
 
@@ -126,7 +112,7 @@ def is_prefill_graph_enabled(runner: Any = None) -> bool:
 def is_prefill_phase_batch(runner: Any, scheduler_output: Any) -> bool:
     """True when every scheduled request is in the prompt-prefill phase.
 
-    Shared by the GPU and NPU prefill-graph interceptions. Validates EVERY
+    Validates EVERY
     scheduled request via the input-batch arrays, so:
       - first chunks, cached prefill, and chunked-prefill continuations are
         admitted (any request with ``num_computed < num_prompt``);
@@ -172,7 +158,7 @@ def is_prefill_phase_batch(runner: Any, scheduler_output: Any) -> bool:
 def scheduled_requests_are_fresh(runner: Any, scheduler_output: Any) -> bool:
     """True when no scheduled request has computed tokens (V1 input batch).
 
-    Graphs captured with dense CUDA Prefill attend over fresh K/V only, so they
+    Graphs captured with dense Prefill attend over fresh K/V only, so they
     must not replay for a request with context (see ``beam_dense_prefill``).
     """
     input_batch = getattr(runner, "input_batch", None)
@@ -286,9 +272,7 @@ class BasePrefillGraphRunner:
         self.gr_settings = GRConfig.from_vllm_config(
             getattr(model_runner, "vllm_config", None)
         ).deployment
-        self.device = getattr(
-            model_runner, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        self.device = model_runner.device
         self.buckets = sorted(
             buckets or get_default_buckets(getattr(model_runner, "vllm_config", None))
         )
@@ -300,8 +284,8 @@ class BasePrefillGraphRunner:
             scheduler_config = getattr(vllm_config, "scheduler_config", None)
         max_num_batched_tokens = getattr(scheduler_config, "max_num_batched_tokens", None)
         max_model_len = get_max_context_len(model_runner)
-        # Only GPU V1 prepares per-request positions for total-token buckets
-        # larger than one model context. Other runners keep the model limit.
+        # Runners that support total-token buckets prepare per-request positions
+        # for buckets larger than one model context; others keep the model limit.
         supports_total_buckets = (
             self.supports_multi_request_total_buckets
             and GRConfig.from_vllm_config(getattr(model_runner, "vllm_config", None)).beam_max_width
@@ -353,7 +337,7 @@ class BasePrefillGraphRunner:
                 for b in self.buckets
             }
         except Exception as e:  # noqa: BLE001
-            if not isinstance(e, RuntimeError) or not is_recoverable_capture_error(e):
+            if not isinstance(e, RuntimeError) or not self._is_recoverable_capture_error(e):
                 raise
             logger.warning("Prefill Graph runner disabled: static buffer allocation failed: %r", e)
             self.buckets = []
@@ -367,6 +351,10 @@ class BasePrefillGraphRunner:
             for t in range(1, self.buckets[-1] + 1):
                 self._bucket_lut[t] = self._compute_match_bucket(t)
 
+    @staticmethod
+    def _is_recoverable_capture_error(error: RuntimeError) -> bool:
+        return False
+
     def _plan_capture_buckets(
         self,
         *,
@@ -375,10 +363,7 @@ class BasePrefillGraphRunner:
         max_model_len: int,
         total_token_buckets: bool,
     ) -> None:
-        """Let CUDA V1 filter feasible capture shapes before allocation.
-
-        The NPU runner uses the shared bucket limits and plans its own captures.
-        """
+        """Allow platform runners to filter feasible capture shapes before allocation."""
 
     def _compute_match_bucket(self, total_tokens: int) -> int | None:
         """Return the smallest captured bucket that can hold the request."""

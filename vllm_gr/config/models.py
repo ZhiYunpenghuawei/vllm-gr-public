@@ -14,23 +14,11 @@ from vllm_gr.config.schema import ConfigFieldSpec
 CONSTRAINT_TABLE_FORMAT = "constraint_table_v1"
 MULTI_TRIE_CONSTRAINT_TABLE_FORMAT = "constraint_table_v2"
 CONSTRAINT_TABLE_MAX_DECODE_STEPS = 3
-# Global Beam width ceiling.  This constant also gates the raw Beam operators,
-# so it is raised only together with the kernels that make W > 256 correct:
-# the hierarchical Top-K used to size every local list from LOCAL_TILE_SIZE
-# (256) regardless of the selection width, which left the merge stage reading
-# slots the local stage never wrote.  With _beam_selection_tiling shared by
-# allocation and launch, a list is now at least as wide as the selection, so
-# widths above the fused-kernel whitelist ({64, 128, 256}) are correct on the
-# hierarchical path.
-#
+# Public Beam width ceiling, independent of backend-specific operator limits.
 MAX_BEAM_WIDTH = 1024
-# Unconstrained Top-K supports the full Beam capacity. Constraint-table
-# operators have a separate output limit, checked when loading the backend.
+# Unconstrained Top-K supports the full Beam capacity. Backends may impose
+# additional operator-specific limits during admission.
 MAX_CANDIDATE_WIDTH = MAX_BEAM_WIDTH
-MAX_CONSTRAINT_CANDIDATE_WIDTH = 256
-# Conservative startup resource policy, including the implicit max-width bank.
-# This bounds retained width count; it is not a guarantee that graphs fit memory.
-MAX_NPU_BEAM_GRAPH_WIDTHS = 8
 SUPPORTED_BEAM_BATCH_SIZES = tuple(range(1, 9))
 
 
@@ -59,8 +47,6 @@ class DeploymentOptions:
     prefill_token_buckets: tuple[int, ...] | None = DEFAULT_PREFILL_TOKEN_BUCKETS
     beam_batch_sizes: tuple[int, ...] = DEFAULT_BEAM_BATCH_SIZES
     prefill_kv_bound: int | None = None
-    npu_bsnd_capture_specs: str = ""
-    npu_stage_lm_head: bool = True
     head_slice: int | str = "auto"
     head_slice_min_rows: int = 1024
     head_slice_max_mb: float = 128
@@ -117,11 +103,7 @@ class DeploymentOptions:
                 raise ValueError(f"gr.{key} requires a positive integer")
         if any(v > 8 for v in self.beam_batch_sizes):
             raise ValueError("GR beam batch sizes must be in 1..8")
-        if self.topk_keep > 256 or self.topk_select not in ("i32", "i64", "flash"):
-            raise ValueError(
-                "gr.topk_keep must be in 1..256 and topk_select must be i32, i64 or flash"
-            )
-        for key in ("prefill_graph_enabled", "npu_stage_lm_head", "prefix_calibration"):
+        for key in ("prefill_graph_enabled", "prefix_calibration"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f"gr.{key} requires a boolean")
         if self.head_slice != "auto" and (type(self.head_slice) is not int or self.head_slice < 0):
@@ -132,15 +114,17 @@ class DeploymentOptions:
             value = getattr(self, name)
             if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"gr.{name} requires a finite nonnegative number")
-        if self.prefix_policy not in (
-            "auto",
-            "off",
-        ) or self.unconstrained_head_layout not in (None, "transposed"):
-            raise ValueError("Unsupported prefix_policy or unconstrained_head_layout")
-        if self.dense_prefill not in ("off", "fa2", "cudnn"):
-            raise ValueError("gr.dense_prefill must be off, fa2 or cudnn")
-        if not isinstance(self.npu_bsnd_capture_specs, str):
-            raise ValueError("gr.npu_bsnd_capture_specs requires a string")
+        # These are algorithm choices, not device admission rules. The active
+        # platform validates which algorithms its implementation supports.
+        for name in ("topk_select", "prefix_policy", "dense_prefill"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"gr.{name} requires a nonempty string")
+        if self.unconstrained_head_layout is not None and (
+            not isinstance(self.unconstrained_head_layout, str)
+            or not self.unconstrained_head_layout
+        ):
+            raise ValueError("gr.unconstrained_head_layout requires a nonempty string or null")
         if self.prefix_calibration_path is not None and not isinstance(
             self.prefix_calibration_path, str
         ):
@@ -200,13 +184,16 @@ class ConstraintMode(str, Enum):
 
 
 class ConstraintBackendKind(str, Enum):
-    """Resolved constraint-table placement, including automatic selection."""
+    """Reserved constraint selectors, independent of concrete platform IDs."""
 
     AUTO = "auto"
     PLATFORM = "platform"
     CPU = "cpu"
-    CUDA = "cuda"
-    NPU = "npu"
+
+
+def constraint_backend_name(backend: ConstraintBackendKind | str) -> str:
+    """Return the case-insensitive transport name of a selector or platform ID."""
+    return backend.value if isinstance(backend, ConstraintBackendKind) else backend.lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +207,7 @@ class ConstraintTableSpec:
         },
     )
     """Absolute artifact path; YAML loading resolves relative paths first."""
-    backend: ConstraintBackendKind = field(
+    backend: ConstraintBackendKind | str = field(
         default=ConstraintBackendKind.AUTO,
         metadata={
             "gr": ConfigFieldSpec(
@@ -229,7 +216,7 @@ class ConstraintTableSpec:
             )
         },
     )
-    """Execution placement of the constraint table."""
+    """Reserved selector or backend ID declared by the selected platform."""
     max_top_k: int | None = field(
         default=None,
         metadata={
@@ -303,13 +290,6 @@ class ConstraintConfig:
     table: ConstraintTableSpec | None = None
 
 
-class NPUDecodeExecution(str, Enum):
-    """Execution mode for the NPU incremental beam decode branch."""
-
-    CASCADE = "cascade"
-    XLLM = "xllm"
-
-
 @dataclass(frozen=True)
 class GRConfig:
     """Validated vLLM-GR configuration reconstructed in each process."""
@@ -324,9 +304,9 @@ class GRConfig:
         },
     )
     """Optional attention backend override."""
-    # Beam-decode FULL CUDA graph (startup dummy capture, runtime replay-only).
+    # Beam-decode graph capture and replay.
     # beam_max_width is the single upper bound on beam width: it sizes the
-    # worker's persistent beam KV pool AND the captured CUDA graph shape
+    # worker's persistent beam KV pool and the captured graph shape
     # (num_tokens = width). None means beam decode is disabled — no pool
     # allocated, no graph captured. When beam_graph_enabled is True and
     # beam_max_width is set, a FULL graph is captured at startup; requests
@@ -366,22 +346,9 @@ class GRConfig:
         },
     )
     """Maximum Beam decode steps, excluding the SID begin and end tokens."""
-    # None = unset: the runtime picks per-platform defaults (xllm on NPU when
-    # the operator library is present, cascade otherwise and on CUDA).
-    npu_decode_execution: NPUDecodeExecution | None = field(
-        default=None,
-        metadata={
-            "gr": ConfigFieldSpec(
-                "validate_npu_decode_execution",
-                canonical_path=("gr", "npu_decode_execution"),
-            )
-        },
-    )
-    """NPU decode mode; None leaves platform selection to the runtime."""
     # None = unset (the Driver applies platform defaults).  True moves the beam
     # decision (beam_search_group / beam_search_rec_final_select +
     # select_unshared_kv) into the V1 stage runner, which owns the result.
-    # CUDA beam deployments default to True; NPU requires xllm execution.
     # Explicit False is preserved; it does not enable a legacy frontend path.
     beam_worker_decision: bool | None = field(
         default=None,
@@ -393,20 +360,6 @@ class GRConfig:
         },
     )
     """Worker decision override; None defers selection and False opts out."""
-    # Exact logical B captured by the NPU Beam graph adapter. This is a graph
-    # signature dimension, not a scheduler capacity: other B values do not use
-    # the Beam FULL graph (native PIECEWISE/NONE dispatch remains available).
-    beam_graph_batch_size: int = field(
-        default=1,
-        metadata={
-            "gr": ConfigFieldSpec(
-                "validate_beam_graph_batch_size",
-                canonical_path=("gr", "decode_graph_batch_size"),
-            )
-        },
-    )
-    """Exact logical batch size captured by the Beam graph adapter."""
-
     # Like beam_graph_enabled, this flag is dormant without a Beam pool.
     enable_short_suffix_attention: bool = field(
         default=True,
@@ -417,7 +370,7 @@ class GRConfig:
             )
         },
     )
-    """Fuse CUDA suffix attention and prefix merging by default; False opts out."""
+    """Allow fused suffix attention and prefix merging; False opts out."""
 
     prefill_flash_attn_version: int | str | None = field(
         default="auto",
@@ -428,29 +381,7 @@ class GRConfig:
             )
         },
     )
-    """CUDA prefill only: auto (default) prefers FA3; None inherits decode; or explicit 2/3."""
-
-    beam_graph_widths: tuple[int, ...] | None = field(
-        default=None,
-        metadata={
-            "gr": ConfigFieldSpec(
-                "validate_beam_graph_widths",
-                canonical_path=("gr", "decode_graph_widths"),
-            )
-        },
-    )
-    """Additional exact NPU Decode input widths to capture at startup."""
-
-    beam_sid_stage_vocab: bool = field(
-        default=False,
-        metadata={
-            "gr": ConfigFieldSpec(
-                "validate_beam_sid_stage_vocab",
-                canonical_path=("gr", "sid_stage_vocab"),
-            )
-        },
-    )
-    """Opt into catalog-free NPU SA/SB/SC domains and stage-local probabilities."""
+    """Prefill FlashAttention version selection interpreted by the platform."""
 
     beam_adapter_cache_enabled: bool = field(
         default=False,
@@ -461,7 +392,7 @@ class GRConfig:
             )
         },
     )
-    """Opt into CUDA stage-adapter and Decode graph reuse across batch sizes."""
+    """Opt into stage-adapter and Decode graph reuse across batch sizes."""
 
     constraint: ConstraintConfig | None = field(
         default=None,
@@ -489,30 +420,6 @@ class GRConfig:
 
         validate_config_fields(self)
         self._resolve_beam_widths()
-        if self.beam_graph_widths is not None and (
-            self.beam_max_width is None or max(self.beam_graph_widths) > self.beam_max_width
-        ):
-            raise ValueError("beam.graph_widths requires max_width >= every captured width")
-        if self.beam_graph_active:
-            capture_widths = set(self.beam_graph_widths or ()) | {self.beam_max_width}
-            if len(capture_widths) > MAX_NPU_BEAM_GRAPH_WIDTHS:
-                raise ValueError(
-                    "beam.graph_widths allows at most "
-                    f"{MAX_NPU_BEAM_GRAPH_WIDTHS} captured widths including max_width, "
-                    f"got {len(capture_widths)}; use fewer widths or disable beam graphs"
-                )
-        constraint = self.constraint
-        unconstrained = constraint is not None and constraint.mode is ConstraintMode.NONE
-        if self.beam_sid_stage_vocab and (
-            not unconstrained
-            or self.beam_worker_decision is not True
-            or self.beam_max_decode_steps > CONSTRAINT_TABLE_MAX_DECODE_STEPS
-        ):
-            raise ValueError(
-                "gr.sid_stage_vocab requires gr.constraint_mode=none, "
-                "gr.worker_decision=True, and "
-                "gr.max_decode_steps <= 3"
-            )
 
     def _resolve_beam_widths(self) -> None:
         widths = self.deployment.beam_width
@@ -563,9 +470,7 @@ class GRConfig:
         return (
             self.constraint is not None
             or self.attention_backend is not None
-            or self.npu_decode_execution is not None
             or self.beam_worker_decision is not None
-            or self.beam_sid_stage_vocab
         )
 
     @property
@@ -649,21 +554,20 @@ def resolve_candidate_width(config: GRConfig) -> int:
     return candidate_width
 
 
-def resolve_constraint_backend(config: GRConfig, device_type: str) -> GRConfig:
-    """Bind AUTO to the driver device before publishing the worker payload."""
+def resolve_constraint_backend(config: GRConfig, backend_id: str) -> GRConfig:
+    """Bind platform selectors to the admitted platform's declared backend ID."""
     constraint = config.constraint
     if (
         constraint is None
         or constraint.table is None
-        or constraint.table.backend is not ConstraintBackendKind.AUTO
+        or constraint.table.backend
+        not in (ConstraintBackendKind.AUTO, ConstraintBackendKind.PLATFORM)
     ):
         return config
-    backend = ConstraintBackendKind(device_type)
-    if backend is ConstraintBackendKind.AUTO:
-        raise ValueError("auto requires a concrete platform device type")
-    return replace(
-        config, constraint=replace(constraint, table=replace(constraint.table, backend=backend))
-    )
+    table = replace(constraint.table, backend=backend_id)
+    if table.backend is ConstraintBackendKind.AUTO:
+        raise ValueError("auto requires a resolved platform backend ID")
+    return replace(config, constraint=replace(constraint, table=table))
 
 
 def deployment_for(vllm_config: object | None) -> DeploymentOptions:

@@ -27,8 +27,8 @@ def package_files(wheel: Path) -> set[str]:
 
 
 def main() -> None:
-    if os.environ.get("VLLM_GR_TARGET_DEVICE") not in {"cpu", "cuda", "npu"}:
-        raise SystemExit("Set VLLM_GR_TARGET_DEVICE to cpu, cuda or npu for both builds.")
+    if os.environ.get("VLLM_GR_TARGET_DEVICE") not in {"cpu", "cuda"}:
+        raise SystemExit("Set VLLM_GR_TARGET_DEVICE to cpu or cuda for both builds.")
     (wheel,) = (ROOT / "dist").glob("*.whl")
     (sdist,) = (ROOT / "dist").glob("*.tar.gz")
     name, version, _, _ = parse_wheel_filename(wheel.name)

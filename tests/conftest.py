@@ -17,7 +17,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 # selected with `-m` by the runner.
 _SLOW_MARKERS = ("slow", "slow_test")
 # Every test declares where it runs; see docs/contributing/ci/test_levels.md#platform-markers.
-_TIER_MARKERS = ("cpu_test", "gpu_test", "npu_test")
+_TIER_MARKERS = ("cpu_test", "gpu_test")
 
 
 def _require_tier_markers(items: list[pytest.Item]) -> None:
@@ -33,7 +33,7 @@ def _require_tier_markers(items: list[pytest.Item]) -> None:
     )
     if missing:
         raise pytest.UsageError(
-            "Test modules without a tier marker (cpu_test, gpu_test or npu_test); "
+            "Test modules without a tier marker (cpu_test or gpu_test); "
             "see docs/contributing/ci/test_levels.md#platform-markers:\n  " + "\n  ".join(missing)
         )
 

@@ -43,12 +43,8 @@ def engine_config_service() -> BackendConfigService:
     return integration.create_config_service()
 
 
-def current_constraint_backend(fallback: str) -> str:
+def current_constraint_backend() -> str:
     """Choose the canonical table implementation declared by the selected GR platform."""
     from .table import current_gr_platform
 
-    try:
-        platform = current_gr_platform()
-    except UnsupportedBackendError:
-        return fallback
-    return platform.canonical_constraint_backend
+    return current_gr_platform().canonical_constraint_backend

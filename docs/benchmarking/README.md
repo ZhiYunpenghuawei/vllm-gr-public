@@ -8,19 +8,12 @@ installed vLLM-GR version.
 
 ## Choose a benchmark
 
-| What do you want to measure? | CUDA GPU | Ascend NPU |
-| --- | --- | --- |
-| Recommendation accuracy | Run the [accuracy benchmark](accuracy.md) with a CUDA constraint table or against a CUDA server. | Use the same [accuracy benchmark](accuracy.md) with an NPU constraint table or against an Ascend server. |
-| HTTP throughput and latency | Run the [HTTP client](throughput.md#online-serving) against a CUDA server. | Run the same client against an [Ascend HTTP server](common.md#online-server-mode). |
-| Offline Beam performance | Measure [dataset throughput](throughput.md#cuda-dataset-throughput) with catalog-constrained generation. | Measure [batch latency and requests/s](throughput.md#ascend-batch-latency) with a fixed prompt and batch size. |
-| Change in performance between two commits | Repeat the [Beam performance workload](../cli/bench/beam_performance.md) on the same device with identical inputs and settings. | Repeat the [Ascend latency example](throughput.md#ascend-batch-latency) on both commits with the same device, model, prompt, Beam settings, and warmup. |
-
-!!! note "Comparing devices"
-
-    The two offline examples measure different workloads. For a cross-device
-    comparison, hold the model, inputs, catalog mode, Beam width, batch size and
-    timing scope constant. The [cache-miss benchmark](../../benchmarks/open_one_rec/V1_BENCHMARK.md)
-    records the CUDA timing scope and historical results.
+| What do you want to measure? | CUDA GPU |
+| --- | --- |
+| Recommendation accuracy | Run the [accuracy benchmark](accuracy.md) with a CUDA constraint table or against a CUDA server. |
+| HTTP throughput and latency | Run the [HTTP client](throughput.md#online-serving) against a CUDA server. |
+| Offline Beam performance | Measure [dataset throughput](throughput.md#cuda-dataset-throughput) with catalog-constrained generation. |
+| Change in performance between two commits | Repeat the [Beam performance workload](../cli/bench/beam_performance.md) on the same device with identical inputs and settings. |
 
 After applying the [vLLM CLI dispatch patch](../cli/README.md#command-form-and-installation),
 run `vllm bench --gr --list` and see the

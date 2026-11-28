@@ -176,7 +176,7 @@ def main() -> None:
     parser.add_argument(
         "--prompt", type=Path, help='UTF-8 prompt file (default: "Recommend the next video.")'
     )
-    parser.add_argument("--constraint-backend", choices=("cuda", "npu"), default="cuda")
+    parser.add_argument("--constraint-backend", choices=("cuda",), default="cuda")
     parser.add_argument(
         "--catalog",
         type=Path,
@@ -226,9 +226,7 @@ def main() -> None:
         **os.environ,
         "ONEREC_BASE_URL": f"http://127.0.0.1:{port}",
         "ONEREC_SERVED_MODEL_NAME": workdir.name,
-        "VLLM_USE_V2_MODEL_RUNNER": "0"
-        if args.constraint_backend == "npu"
-        else os.environ.get("VLLM_USE_V2_MODEL_RUNNER") or "1",
+        "VLLM_USE_V2_MODEL_RUNNER": os.environ.get("VLLM_USE_V2_MODEL_RUNNER") or "1",
     }
     command = [
         "vllm",

@@ -184,7 +184,7 @@ def _wide_table(vocab_size: int = 300) -> ConstraintTable:
     )
 
 
-def test_cpu_backend_supports_top_k_above_npu_limit() -> None:
+def test_cpu_backend_supports_top_k_above_device_kernel_limit() -> None:
     backend = _backend(_wide_table(), max_top_k=300, max_rows=1)
     output = _select(
         backend,

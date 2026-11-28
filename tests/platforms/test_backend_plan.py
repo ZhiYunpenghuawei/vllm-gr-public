@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-from tests.helpers.ascend_platform import AscendGRPlatform
 from tests.helpers.cuda_platform import CudaGRPlatform
 from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import (
@@ -43,7 +42,6 @@ from vllm_gr.v1.worker.runner_binding import (
 )
 
 cuda = CudaGRPlatform()
-ascend = AscendGRPlatform()
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
@@ -385,7 +383,7 @@ def test_readiness_checks_actual_decode_and_per_kind_selection(
             )
     with pytest.raises(RuntimeError, match="Workers disagree"):
         validate_worker_readiness(
-            plan, [report, {**report, "decode_mode": "xllm"}], expected_workers=2
+            plan, [report, {**report, "decode_mode": "other-decode"}], expected_workers=2
         )
     with pytest.raises(RuntimeError, match="bound full_attention"):
         validate_worker_readiness(
@@ -393,7 +391,9 @@ def test_readiness_checks_actual_decode_and_per_kind_selection(
             [{**report, "attention_by_kind": {"full_attention": ["FLASH_ATTN"]}}],
             expected_workers=1,
         )
-    plan = replace(plan, choices=PlanData({**plan.choices.to_dict(), "decode_attention": "xllm"}))
+    plan = replace(
+        plan, choices=PlanData({**plan.choices.to_dict(), "decode_attention": "other-decode"})
+    )
     with pytest.raises(RuntimeError, match="bound Decode mode"):
         validate_worker_readiness(
             plan, [{**report, "fingerprint": plan.fingerprint}], expected_workers=1
@@ -586,8 +586,8 @@ def test_readiness_rejects_missing_required_service(
         validate_worker_readiness(plan, [report], expected_workers=1)
 
 
-@pytest.mark.parametrize("invalid", ["missing-limits", "wrong-placement", "unknown-policy"])  # type: ignore[misc]
-def test_admitted_beam_policy_rejects_missing_or_mismatched_platform_limits(invalid: str) -> None:
+@pytest.mark.parametrize("invalid", ["missing-limits", "invalid-placement", "invalid-policy"])  # type: ignore[misc]
+def test_admitted_beam_policy_rejects_invalid_platform_limits(invalid: str) -> None:
     from vllm_gr.platforms.beam_requests import validate_gr_device_config
 
     native = config()
@@ -596,13 +596,15 @@ def test_admitted_beam_policy_rejects_missing_or_mismatched_platform_limits(inva
     choices = plan.choices.to_dict()
     if invalid == "missing-limits":
         del choices["beam_limits"]
-    elif invalid == "wrong-placement":
-        choices["beam_limits"]["device_type"] = "npu"
+    elif invalid == "invalid-placement":
+        choices["beam_limits"]["device_type"] = 42
     else:
-        choices["beam_limits"]["host_policy"] = "vendor_package.arbitrary_function"
+        choices["beam_limits"]["host_policy"] = 42
     wire = ResolvedChoices.from_plan(replace(plan, choices=PlanData(choices))).to_wire()
     native.additional_config[BACKEND_PLAN_KEY] = wire
-    with pytest.raises(ValueError, match="admission limits|admitted GR platform"):
+    with pytest.raises(
+        ValueError, match="admission limits|admitted GR platform|Beam admission device_type"
+    ):
         validate_gr_device_config(native)
 
 
@@ -614,17 +616,6 @@ def test_builtin_plans_are_pure_and_preserve_runner_and_decode_policy() -> None:
     native.use_v2_model_runner = True
     request = normalize_backend_request(native, cuda)
     assert cuda.resolve(request).choices.to_dict()["stage"] == "cuda.v2"
-    npu_request = normalize_backend_request(native, ascend)
-    choices = ascend.resolve(npu_request).choices.to_dict()
-    assert choices["stage"] == "ascend.v1"
-    assert choices["decode_attention"] == "auto"
-    with pytest.raises(ValueError, match="xllm"):
-        cuda.resolve(
-            replace(
-                request,
-                config=PlanData({**request.config.to_dict(), "npu_decode_execution": "xllm"}),
-            )
-        )
 
 
 def test_resolver_cannot_change_request_identity(
@@ -635,6 +626,39 @@ def test_resolver_cannot_change_request_identity(
     monkeypatch.setattr(implementation, "resolve", lambda _: replace(plan, backend_id="wrong"))
     with pytest.raises(ValueError, match="identity"):
         resolve_backend_plan(implementation, request)
+
+
+def test_platform_plan_rejects_a_foreign_constraint_backend() -> None:
+    from tests.helpers.gr_config import table_constraint
+
+    native = config()
+    constraint = table_constraint()
+    assert constraint.table is not None
+    constraint = replace(constraint, table=replace(constraint.table, backend="foreign"))
+    GRConfig(beam_max_width=16, constraint=constraint).write_to_vllm_config(native)
+    request = normalize_backend_request(native, cuda)
+    with pytest.raises(ValueError, match="not supported by the selected GR platform"):
+        resolve_backend_plan(cuda, request)
+
+
+@pytest.mark.parametrize("placement", ["cuda", "vendor", None])  # type: ignore[misc]
+def test_unadmitted_host_config_does_not_infer_platform_capabilities(
+    placement: str | None,
+) -> None:
+    from vllm_gr.platforms.admission import beam_limits
+    from vllm_gr.platforms.beam_requests import validate_gr_device_config
+
+    native = config()
+    native.device_config = SimpleNamespace(device=placement)
+    limits = beam_limits(native)
+    assert limits.device_type == placement
+    assert limits.backend_id is None
+    assert limits.constraint_backend is None
+    assert not limits.supports_unconstrained
+    assert not limits.supports_dynamic_width
+    assert not limits.supports_online_trie_reload
+    with pytest.raises(ValueError, match="No GR platform admitted"):
+        validate_gr_device_config(native)
 
 
 def test_unknown_reserved_key_still_fails_and_invalid_plan_is_not_ignored() -> None:
@@ -757,19 +781,23 @@ def test_custom_platform_binds_its_attention_layers_to_one_runner(
     assert layer.execution is None
 
 
-def test_original_builtin_limits_preserve_the_remote_frontend_policy() -> None:
+def test_limits_do_not_infer_missing_remote_frontend_capabilities() -> None:
     from vllm_gr.platforms.admission import beam_limits
 
     native = config()
-    plan = ascend.resolve(normalize_backend_request(native, ascend))
+    plan = cuda.resolve(normalize_backend_request(native, cuda))
     wire = ResolvedChoices.from_plan(plan).to_wire()
-    wire["versions"]["integration"] = "vllm_gr.platforms.ascend.integration"
-    for field in ("host_policy", "supports_dynamic_width", "supports_unconstrained"):
+    wire["versions"]["integration"] = "vllm_gr.platforms.cuda.integration"
+    for field in (
+        "host_policy",
+        "supports_dynamic_width",
+        "supports_unconstrained",
+        "supports_online_trie_reload",
+    ):
         del wire["choices"]["beam_limits"][field]
     native.additional_config[BACKEND_PLAN_KEY] = wire
     limits = beam_limits(native)
-    assert (
-        limits.host_policy == "ascend"
-        and limits.supports_dynamic_width
-        and limits.supports_unconstrained
-    )
+    assert limits.host_policy is None
+    assert not limits.supports_dynamic_width
+    assert not limits.supports_unconstrained
+    assert not limits.supports_online_trie_reload

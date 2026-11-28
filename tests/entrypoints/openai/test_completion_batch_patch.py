@@ -637,14 +637,14 @@ def test_restore_route_preserves_preinstalled_fallback(
     [
         # Adjusted budget (public budget minus boundary tokens) above one
         # needs Decode rows; at or below one the request is Prefill-only.
-        ("npu", 512, 256, 5, ("begin",), False),
-        ("npu:0", 1023, 256, 5, ("begin",), False),
-        ("npu", 1024, 256, 5, ("begin",), True),
-        ("npu", 512, 128, 5, ("begin",), True),
-        ("npu", 512, 256, 3, ("begin",), False),
-        ("npu", 512, 256, 4, ("begin", "end"), False),
-        ("npu", 512, 256, 2, ("begin",), True),
-        ("npu", 512, 256, 3, ("begin", "end"), True),
+        ("vendor", 512, 256, 5, ("begin",), False),
+        ("vendor:0", 1023, 256, 5, ("begin",), False),
+        ("vendor", 1024, 256, 5, ("begin",), True),
+        ("vendor", 512, 128, 5, ("begin",), True),
+        ("vendor", 512, 256, 3, ("begin",), False),
+        ("vendor", 512, 256, 4, ("begin", "end"), False),
+        ("vendor", 512, 256, 2, ("begin",), True),
+        ("vendor", 512, 256, 3, ("begin", "end"), True),
         ("cuda", 512, 256, 5, ("begin",), True),
     ],
 )
@@ -665,6 +665,23 @@ def test_decode_capacity_is_checked_before_batch_submission(
         max_num_batched_tokens=tokens, prompt_lengths=dict.fromkeys(range(4), 16)
     )
     serving.engine_client.vllm_config.device_config = SimpleNamespace(device=device)
+    if device.startswith("vendor"):
+        from vllm_gr.platforms import beam_requests
+        from vllm_gr.platforms.admission import BeamLimits
+
+        # A platform plugin can admit its own physical Decode row budget.
+        limits = BeamLimits(
+            "vendor",
+            tokens,
+            False,
+            None,
+            "v2",
+            None,
+            None,
+            backend_id="vendor",
+            supports_unconstrained=True,
+        )
+        monkeypatch.setattr(beam_requests, "beam_limits", lambda _: limits)
     monkeypatch.setattr(patch_module, "get_max_tokens", lambda *_args, **_kwargs: budget)
     xargs = {"begin_token": 1} if "begin" in boundaries else {}
     if "end" in boundaries:
@@ -679,7 +696,7 @@ def test_decode_capacity_is_checked_before_batch_submission(
         assert result == "original"
         assert not serving.beam_calls
         assert delegate == [request]
-        assert "NPU Decode" in _declines(logged)[0][2]
+        assert "Decode batch size" in _declines(logged)[0][2]
 
 
 pytestmark = pytest.mark.cpu_test

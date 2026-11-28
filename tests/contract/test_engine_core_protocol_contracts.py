@@ -421,7 +421,6 @@ def test_gr_dispatch_only_admits_v1(monkeypatch) -> None:
     [
         ("engine.arg_utils_gr", "engine.arg_utils"),
         ("v1.engine.async_llm", "v1.engine.output_processor"),
-        ("v1.engine.npu_admission", "platforms.npu_admission"),
     ],
 )
 def test_legacy_engine_import_uses_same_module(old, owner):

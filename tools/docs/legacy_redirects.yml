@@ -77,12 +77,7 @@ features/attention.md:
     design/feature/cuda_decode_attention.md#per-beam-suffix-and-final-merge: [cuda-short-suffix-attention, scope-and-limitations]
     design/feature/cuda_decode_attention.md#configuration: [configuration]
     design/feature/cuda_decode_attention.md#performance: [validation-and-performance]
-    design/feature/npu_prefill_bsnd.md: [npu-bsnd-prefill]
-    design/feature/npu_prefill_bsnd.md#configuration: [configuration_1]
-    design/feature/npu_prefill_bsnd.md#replay-and-fallback: [execution-and-fallback]
-    design/feature/npu_prefill_bsnd.md#validation: [validation]
-    design/feature/npu_decode_execution.md#caller-owned-xattention-output: [npu-xattention-output-binding, supported-path-and-fallback]
-    user_guide/beam_search_npu.md#optional-xattention-output-binding: [requirements, build, validate-the-binding]
+    user_guide/feature_compatibility.md: [npu-bsnd-prefill, configuration_1, execution-and-fallback, validation, npu-xattention-output-binding, supported-path-and-fallback, requirements, build, validate-the-binding]
 features/beam-search.md:
   page: design/feature/beam_batch_execution.md
   sections:
@@ -104,7 +99,7 @@ features/constraint-tables.md:
   sections:
     configuration/constraint_tables.md#build: [from-a-catalog-to-valid-candidates]
     configuration/constraint_tables.md#multiple-tries: [multiple-trie-roots]
-    design/module/constraint_tables.md#ascend: [npu-execution]
+    user_guide/feature_compatibility.md: [npu-execution]
     design/module/constraint_tables.md#artifact-layout: [layout-and-compatibility]
 features/cuda-graphs.md:
   page: design/feature/cuda_prefill_graph.md
@@ -131,11 +126,9 @@ features/hot-update.md:
     design/feature/weight_update.md#online-catalog-replacement: [trie-task]
     design/feature/weight_update.md#validation: [validation, validation-entrypoints, unit-and-component-coverage, related-regression-boundaries]
 features/unconstrained-beam-search.md:
-  page: user_guide/beam_search_npu.md
+  page: user_guide/feature_compatibility.md
   sections:
-    user_guide/beam_search_npu.md#configuration-and-python-entry-point: [configuration, optional-sid-token-family-restriction]
-    user_guide/beam_search_npu.md#supported-execution-boundaries: [candidate-and-score-semantics, execution-support]
-    design/feature/npu_decode_execution.md#validation: [validation-entrypoints]
+    user_guide/feature_compatibility.md: [configuration, optional-sid-token-family-restriction, candidate-and-score-semantics, execution-support, validation-entrypoints]
 getting_started/first-inference.md:
   page: getting_started/quickstart.md
   sections:
@@ -143,11 +136,17 @@ getting_started/first-inference.md:
     getting_started/quickstart.md#expected-output: [3-inspect-the-result]
     getting_started/quickstart.md#online-serving: [where-to-go-next]
 getting_started/installation/ascend.md:
-  page: getting_started/installation/npu.md
+  page: user_guide/feature_compatibility.md
   sections:
-    contributing/ci/local_runner.md#ascend-test-runtime: [jenkins-test-runtime]
-    design/feature/npu_decode_execution.md#configuration: [npu-decode-execution-options]
-    design/feature/npu_prefill_bsnd.md#configuration: [optional-bsnd-prefill-graphs]
+    user_guide/feature_compatibility.md: [jenkins-test-runtime, npu-decode-execution-options, optional-bsnd-prefill-graphs]
+getting_started/installation/npu.md:
+  page: user_guide/feature_compatibility.md
+user_guide/beam_search_npu.md:
+  page: user_guide/feature_compatibility.md
+design/feature/npu_decode_execution.md:
+  page: user_guide/feature_compatibility.md
+design/feature/npu_prefill_bsnd.md:
+  page: user_guide/feature_compatibility.md
 getting_started/installation/cuda.md:
   page: getting_started/installation/gpu.md
   sections:

@@ -31,20 +31,12 @@ The CUDA JSON report includes `cache_miss_e2e_ms` and `requests_per_second`.
 The runner times one request at a time, including text encoding and Beam output
 decoding. It resets the prefix cache before each timed request.
 
-### Ascend batch latency
-
-Use the [Ascend offline Beam latency example](../../examples/offline_inference/beam_search/README.md#measure-latency-without-profiling).
-It runs full-vocabulary Beam search on a fixed prompt at batch sizes 1, 2, and 4.
-After warmup, it records batch latency (including P50 and P95), requests/s, and
-returned beams/s. For a revision comparison, keep the same workload and save
-a separate JSON file for each revision and batch size.
-
 <a id="2-online-api-server-mode-production-like"></a>
 
 ## Online serving
 
 Start the server as described in [common benchmark setup](common.md#online-server-mode).
-The HTTP client works with either a CUDA or an Ascend server. The example
+The HTTP client works with a CUDA server. The example
 uses the model snapshot path as the served name and loads the tokenizer from
 that same path.
 

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from vllm_gr.config import GRConfig
+from vllm_gr.config import GRConfig, constraint_backend_name
 from vllm_gr.config.models import (
     ConstraintMode,
     configured_constraint_mode,
@@ -25,16 +25,8 @@ def validate_gr_device_config(config: Any, request: BeamBatchRequest | None = No
     """Check execution support without importing a device runtime."""
     limits = beam_limits(config)
     gr = GRConfig.from_vllm_config(config)
-    if limits.backend_id is None and limits.device_type not in (None, "cuda", "npu"):
-        raise ValueError(
-            "Asynchronous scheduling requires a CUDA ModelRunner or NPU ModelRunner V1"
-        )
-    if limits.host_policy == "ascend":
-        from vllm_gr.platforms.ascend.admission import validate_npu_device_config
-
-        validate_npu_device_config(limits, gr, request)
-    elif gr.beam_sid_stage_vocab:
-        raise ValueError("beam.sid_stage_vocab requires NPU ModelRunner V1")
+    if limits.backend_id is None:
+        raise ValueError("No GR platform admitted for asynchronous scheduling on this device")
     if configured_constraint_mode(gr) is ConstraintMode.NONE and not limits.supports_unconstrained:
         raise ValueError("The admitted GR platform does not support unconstrained beam_search")
     if (
@@ -91,7 +83,11 @@ def validate_frontend_constraint_mode(
     backend = limits.constraint_backend
     if backend is None:
         raise ValueError("The admitted GR platform does not support a canonical constraint table")
-    if table is None or not table.enabled or table.backend.value != backend:
+    if (
+        table is None
+        or not table.enabled
+        or constraint_backend_name(table.backend) != constraint_backend_name(backend)
+    ):
         raise ValueError(
             f"beam_search requires an enabled canonical {backend.upper()} constraint table"
         )

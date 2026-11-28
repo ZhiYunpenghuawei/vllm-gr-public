@@ -22,6 +22,7 @@ from vllm_gr.config.models import (
     ConstraintTableSpec,
     DeploymentOptions,
     GRConfig,
+    constraint_backend_name,
 )
 from vllm_gr.config.schema import config_fields
 from vllm_gr.config.validation import validate_constraint_mode
@@ -256,7 +257,7 @@ def gr_config_to_mapping(config: GRConfig) -> dict[str, object]:
             if table is None
             else {
                 "path": table.path,
-                "backend": table.backend.value,
+                "backend": constraint_backend_name(table.backend),
                 "format": table.format,
                 "max_top_k": table.max_top_k,
                 "digests": {"artifact": table.artifact_digest, "tokenizer": table.tokenizer_digest},

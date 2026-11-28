@@ -18,16 +18,10 @@ Scope: `core`; backend ID: `null`
 The general plugin reads vLLM's native platform identity and resolves a GR platform class from installed probes and the built-in table. It sets ModelRunner defaults and checks runtime
 compatibility before installing platform and shared patches. The frontend and EngineCore use their own ordered plans. Each
 patch module verifies its bindings so repeated initialization can reuse an
-existing wrapper.
-
-# GR-PATCH-002 — NPUWorker Initialization Hook
-
-Scope: `backend`; backend ID: `ascend`
-
-The [NPU startup hooks](../../../vllm_gr/v1/worker/npu/startup_patch.py) install
-worker utilities before native device initialization constructs the runner.
-An early import can precede worker availability, so later initialization
-retries the installation. The platform configuration filter can run separately.
+existing wrapper. The selected GR platform is installed as the process
+`current_platform`. `GRPlatform.get_attn_backend_cls` selects the Beam
+backend or delegates to the native platform; GR no longer claims a global
+CUSTOM registry slot.
 
 ## GR-PATCH-003 — FlatLogprobs Fast Append Override
 
@@ -106,23 +100,7 @@ CUDA ModelRunner V1 and V2 adapt native input preparation, stage execution and
 output completion. Request ordering, graph-visible storage and native lifecycle
 boundaries have to agree. See the [runner contract](model_runner_v2.md).
 
-## GR-PATCH-012 — NPU ModelRunner Override
-
-Scope: `backend`; backend ID: `ascend`
-
-The Ascend worker adapts native rows and attention metadata for grouped Beam
-execution. Cached prefixes, real row lengths and parent selection must stay
-aligned with native block tables. See
-[Ascend Beam Decode execution](../feature/npu_decode_execution.md).
-
-The [worker stage projection](../../../vllm_gr/v1/worker/npu/stage_projection.py)
-wraps the instance logits processor, runner reload and native worker weight-update
-methods. It invalidates the projection before native writes and refreshes it after
-finalization and device synchronization. The
-[operator helper](../../../vllm_gr/ops/npu/stage_projection.py) owns the fixed-address
-weights, biases and proxies.
-
-# GR-PATCH-015 — Sliced Vocabulary Projection
+## GR-PATCH-015 — Sliced Vocabulary Projection
 
 Scope: `core`; backend ID: `null`
 
@@ -131,43 +109,13 @@ Processors without a window use native full-vocabulary projection. Sliced
 projection also adapts log-probability collection. Head-derived caches must stay valid across
 native weight reload.
 
-## GR-PATCH-016 — NPU-aware Spawn Start Method
-
-Scope: `backend`; backend ID: `ascend`
-
-Ascend subprocesses must use a compatible start method when the parent has
-initialized the device. The Ascend integration installs spawn protection before
-the native worker initialization hook.
-
-## GR-PATCH-018 — Ascend Penalties Warmup OOM Guard
-
-Scope: `backend`; backend ID: `ascend`
-
-Ascend warmup can allocate penalty tensors that exceed available memory. The
-[NPU startup hook](../../../vllm_gr/v1/worker/npu/startup_patch.py) handles the
-warmup allocation failure while preserving other execution errors.
-The inventory lists no behavioural test for this guard.
-
-## GR-PATCH-019 — Ascend additional_config Sanitizer
-
-Scope: `backend`; backend ID: `ascend`
-
-The [Ascend configuration patch](../../../vllm_gr/platforms/ascend/config_patch.py)
-retains GR settings while filtering keys passed to the native configuration
-reader. Fresh EngineCore processes install the common plan before native
-construction. Worker startup also refreshes the filter's native bindings.
-
-## GR-PATCH-021 — Contiguous Beam Prefix KV
-
-Scope: `backend`; backend ID: `ascend`
-
-The [NPU cache layout patch](../../../vllm_gr/v1/worker/npu/kv_layout_patch.py)
-lets eligible Ascend xllm Beam layers request contiguous prefix K/V at native
-allocation. Attention row selection is a separate reader (`select_beam_rows`)
-that checks layout, strides and format before using the paged block table.
-An unsuitable layout keeps the gather path.
-
 ## Retired patches
+
+GR-PATCH-001 and GR-PATCH-013 were replaced by the unified platform attention
+selection seam. The remaining legacy built-in Ascend hooks (002, 012, 016,
+018, 019, 021) were removed with the old device integration. Refer to the
+[checked inventory](../runtime_patch_inventory.md#retired-patches) for each
+historical target and rationale.
 
 Retired IDs stay in the YAML inventory for traceability. They have no active
 installer.

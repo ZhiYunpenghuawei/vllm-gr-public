@@ -3,8 +3,7 @@
 Each beam Decode consumes token IDs selected by the previous stage. EngineCore
 can issue the next stage before the worker acknowledges the previous one, so
 the CUDA worker prepares the next input layout while the GPU is still selecting
-beams. Selected tokens stay on the device. CUDA and Ascend share the scheduler
-but implement the handoff differently.
+beams. Selected tokens stay on the device. All GR platforms share the scheduler and bind their own stage execution.
 
 ## Scheduling model
 
@@ -53,14 +52,6 @@ The two model runners hand off host buffers differently:
 | CUDA ModelRunner V1 | After the input event, when present. Prefill can still be reading pinned host buffers that the update will reuse, so the stage fence waits for it. |
 | CUDA ModelRunner V2 | As soon as the layout is ready. V2 builds a fresh input batch for every step and reuses no pinned host buffers, so its fence is a no-op. |
 
-## Ascend stage execution
-
-One Ascend runner handles every stage of the batch. It samples its pending
-forward before accepting another stage, returns a receipt to EngineCore and
-keeps the selected token IDs on the NPU. Two prompts with input width three
-advance one position each in the scheduler and produce six physical Decode
-rows. See [Ascend Decode execution](npu_decode_execution.md).
-
 ## Completion and cancellation
 
 ![Beam session lifecycle: normal completion moves through Admitted, Owned, Issuing and Draining. Retirement follows confirmed release, with a separate cleanup step when needed. Dashed red paths show queued and active cancellation.](../../assets/async_scheduling_lifecycle.svg)
@@ -74,9 +65,7 @@ rows. See [Ascend Decode execution](npu_decode_execution.md).
 | Dashed red | Cancellation path. |
 
 EngineCore delivers the terminal result after issued stages drain and the
-worker confirms release for the matching session and owner generation. On
-Ascend, final sampling builds the result, releases the Beam state and sets
-`resources_released` in the same receipt. If stages have drained but the worker
+worker confirms release for the matching session and owner generation. If stages have drained but the worker
 still owns resources, the scheduler issues a zero-token cleanup and waits for
 its acknowledgement. The native member requests are then finished and
 suppressed; the frontend-visible finish reason is synthesized as `LENGTH` on
@@ -110,10 +99,7 @@ host preparation overlaps the previous GPU stage.
 
 The [OneRec scheduler system test](../../../tests/e2e/test_onerec_v1_scheduler_st.py)
 covers offline and online execution on both CUDA runners, including retirement
-at result delivery; on Ascend, the [worker](../../../tests/v1/worker/test_npu_model_runner_patch.py),
-[cleanup](../../../tests/v1/worker/test_npu_stage_preparation_rollback.py) and
-[dynamic-width](../../../tests/e2e/test_npu_dynamic_beam_st.py) tests cover row
-counts, failure recovery and eager or graph execution.
+at result delivery.
 
 ## Source map
 
@@ -123,7 +109,6 @@ counts, failure recovery and eager or graph execution.
 | [CUDA stage runner](../../../vllm_gr/v1/worker/cuda/gpu_beam_stage_runner.py) | Orders device work and status copies. |
 | [V1 hooks](../../../vllm_gr/v1/worker/cuda/v1/gpu_beam_stage_runner_v1.py) | Implements the pinned-host-buffer fence after Prefill. |
 | [V2 hooks](../../../vllm_gr/v1/worker/cuda/v2/gpu_beam_stage_runner_v2.py) | Reuses no host buffers, so its fence is a no-op. |
-| [Ascend stage runner](../../../vllm_gr/v1/worker/npu/npu_beam_stage_runner.py) | Executes and samples a pending stage. |
 
 [Beam batch execution](beam_batch_execution.md#validation-boundaries) defines
 admission. The [OneRec walkthrough](../../user_guide/onerec_quickstart.md) shows

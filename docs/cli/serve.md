@@ -4,9 +4,7 @@
 OpenAI-compatible HTTP API; add `--grpc` for the gRPC transport.
 For OneRec Beam serving, use the
 [prepared serving configuration](../../examples/online_serving/catalog/README.md#prepare-a-serving-configuration)
-in place of `engine.yaml`. On Ascend, select
-[ModelRunner V1](../configuration/README.md#modelrunner-selection) by setting
-`VLLM_USE_V2_MODEL_RUNNER=0` before starting the server or running its help.
+in place of `engine.yaml`.
 
 ## Usage
 

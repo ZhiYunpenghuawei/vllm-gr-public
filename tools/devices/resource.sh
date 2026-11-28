@@ -3,27 +3,11 @@
 
 
 # This script is meant to be sourced.
-# It provides utilities to allocate and manage local GPU or NPU resources.
+# It provides utilities to allocate and manage local CUDA GPU resources.
 
 _vllm_gr_device_tools_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
-# Detect if we are in an NPU environment
-if command -v npu-smi &> /dev/null; then
-    npu_state=true
-else
-    npu_state=false
-fi
-
-if [ "$npu_state" = true ]; then
-    # shellcheck source=tools/devices/resource-npu.sh
-    source "$_vllm_gr_device_tools_dir/resource-npu.sh"
-fi
-
 function is_available() {
-    if [ "$npu_state" = true ]; then
-        is_available_npu "$@"
-        return $?
-    fi
     local i=$1
     local mem_gpu=$2
 
@@ -78,10 +62,6 @@ function _cuda_device_indices() {
 }
 
 function get_gpu() {
-    if [ "$npu_state" = true ]; then
-        get_npu "$@"
-        return $?
-    fi
 
     local mem_gpu=${1:-16}
     local timeout_secs=${2:-15} # seconds to wait; 0 waits indefinitely
@@ -117,10 +97,6 @@ function get_gpu() {
 }
 
 function get_gpus() {
-    if [ "$npu_state" = true ]; then
-        get_npus "$@"
-        return $?
-    fi
 
     local num_gpus=${1:-1}
     local mem_gpu=${2:-16}
@@ -186,22 +162,14 @@ function lock_gpu() {
     fi
     local ready_file
     ready_file=$(mktemp) || return 1
-    if [ "$npu_state" = true ]; then
-        if ! lock_pid=$(lock_npu "$@"); then
-            rm -f -- "$ready_file"
-            return 1
-        fi
-        echo "READY" > "$ready_file"
-    else
-        local interpreter
-        if ! interpreter=$(command -v python || command -v python3); then
-            rm -f -- "$ready_file"
-            echo "Cannot lock GPU: install python or python3" >&2
-            return 1
-        fi
-        "$interpreter" "$_vllm_gr_device_tools_dir/lock_gpu.py" "$gpu_id" > "$ready_file" 2>&1 &
-        lock_pid=$!
+    local interpreter
+    if ! interpreter=$(command -v python || command -v python3); then
+        rm -f -- "$ready_file"
+        echo "Cannot lock GPU: install python or python3" >&2
+        return 1
     fi
+    "$interpreter" "$_vllm_gr_device_tools_dir/lock_gpu.py" "$gpu_id" > "$ready_file" 2>&1 &
+    lock_pid=$!
     # Poll until we see 'READY' or the process dies (max ~10s).
     local ready=0
     for (( i=0; i<40; i++ )); do
@@ -230,10 +198,6 @@ function lock_gpu() {
 # unlock_gpu <pid>
 # Kills the background process that is holding the GPU memory.
 function unlock_gpu() {
-    if [ "$npu_state" = true ]; then
-        unlock_npu "$@"
-        return $?
-    fi
 
     local pid=$1
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
@@ -241,10 +205,6 @@ function unlock_gpu() {
 
 function lock_gpus() {
     local gpus_list=$1
-    if [ "$npu_state" = true ]; then
-        lock_npus "$@"
-        return $?
-    fi
 
     local pids=""
     IFS=',' read -ra gpus <<< "$gpus_list"
@@ -270,10 +230,6 @@ function lock_gpus() {
 
 function unlock_gpus() {
     local pids_list=$1
-    if [ "$npu_state" = true ]; then
-        unlock_npus "$@"
-        return $?
-    fi
 
     local -a lock_pids
     local pid status=0

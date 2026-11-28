@@ -143,7 +143,7 @@ def _install_fake_vllm_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         # ``check_environment()`` → ``from vllm.platforms import
         # current_platform``.  The real ``vllm.platforms`` would import
         # ``vllm.utils.import_utils`` through the fake non-package
-        # ``vllm.utils`` above, so it must be faked as well.  A non-npu
+        # ``vllm.utils`` above, so it must be faked as well.  A generic
         # device_type keeps the check on the version-only path.
         "vllm.platforms": _module(
             "vllm.platforms",

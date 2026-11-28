@@ -4,7 +4,7 @@
 
 Markers are descriptive, so a CPU runner selects them away with ``-m``
 rather than relying on an implicit skip. A test that declares any tier itself
-(the NPU suites, or host-side reference cases marked ``cpu_test``) keeps it.
+(for example host-side reference cases marked ``cpu_test``) keeps it.
 """
 
 import gc
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 # Any declared tier wins, including an explicit cpu_test for host-side cases.
-_TIER_MARKERS = ("cpu_test", "gpu_test", "npu_test")
+_TIER_MARKERS = ("cpu_test", "gpu_test")
 _DIRECTORY = Path(__file__).resolve().parent
 
 

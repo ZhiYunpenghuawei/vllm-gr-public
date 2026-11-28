@@ -59,9 +59,8 @@ extension of vLLM.
 - Roll out model weights and replace item catalogs independently. Weight updates
   pause and drain instances. Online catalog replacement requires asynchronous
   Beam execution on CUDA.
-- Reuse vLLM's platform abstraction to support CUDA GPUs and Ascend NPUs with
-  device-specific worker and ModelRunner optimizations, and extend support to
-  other hardware backends.
+- Reuse vLLM's platform abstraction for CUDA worker and ModelRunner
+  optimizations and independently distributed hardware plugins.
 
 ### vLLM-GR supports the following models
 
@@ -71,7 +70,7 @@ extension of vLLM.
 ## Getting Started
 
 - [Installation](docs/getting_started/installation/README.md) — Install vLLM-GR
-  from source on NVIDIA GPUs or Ascend NPUs.
+  from source on NVIDIA GPUs.
 - [OneRec quickstart](docs/getting_started/quickstart.md) — Generate ranked
   recommendations with OneRec-1.7B offline or serve the model over HTTP.
 - [Feature compatibility](docs/user_guide/feature_compatibility.md) — Check

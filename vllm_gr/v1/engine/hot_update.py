@@ -15,6 +15,7 @@ from typing import Any
 from vllm_gr.config import GRConfig
 from vllm_gr.config.models import runtime_constraint_table
 from vllm_gr.constraints.versioned_table import INITIAL_CONSTRAINT_VERSION
+from vllm_gr.platforms.admission import beam_limits
 from vllm_gr.update_status import ServiceState, ServiceStatus
 
 
@@ -90,8 +91,8 @@ def _reload_trie(core: Any, path: str, version: str) -> dict[str, Any]:
     table = runtime_constraint_table(config)
     if table is None or not table.enabled:
         raise ValueError("Online Trie reload requires an enabled canonical constraint table")
-    if table.backend.value != "cuda":
-        raise ValueError("Online Trie reload currently requires the CUDA GR execution path")
+    if not beam_limits(core.vllm_config).supports_online_trie_reload:
+        raise ValueError("The admitted GR platform does not support online Trie reload")
     if not core.vllm_config.scheduler_config.async_scheduling:
         raise ValueError("Online Trie reload requires asynchronous GR scheduling")
     resources = _resources(core)

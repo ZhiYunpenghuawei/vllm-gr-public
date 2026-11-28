@@ -82,7 +82,7 @@ class OneRecV1STWorkerExtension:
         return _worker_snapshot(self)
 
     def onerec_v1_st_graphs(self) -> dict[str, Any]:
-        from vllm_gr.v1.worker.gr_context import (
+        from vllm_gr.v1.worker.cuda.gr_context import (
             get_beam_graph_runtime_stats,
         )
 

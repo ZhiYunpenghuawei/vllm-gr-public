@@ -19,7 +19,6 @@ from vllm_gr.constraints.compiler import (
 from vllm_gr.constraints.execution import (
     INVALID_LOGIT,
     ConstrainedTopKTensorResult,
-    NPUConstrainedTopKExecution,
     TorchConstrainedTopKExecution,
 )
 from vllm_gr.constraints.json_compiler import compile_relations_json
@@ -215,38 +214,6 @@ def test_execution_keeps_legal_logprob_at_padding_sentinel_magnitude(
     assert bool((result.top_logprobs[0][result.valid_mask[0]] < (INVALID_LOGIT / 2)).any())
 
 
-def test_npu_adapter_fails_explicitly_when_op_unavailable(tokenizer: MagicMock) -> None:
-    """The NPU adapter must not silently fall back to Torch."""
-    resource = _build_resource(tokenizer)
-    execution = NPUConstrainedTopKExecution(device="cpu")
-
-    # In a non-NPU environment is_available() is False.
-    if execution.is_available():
-        pytest.skip("NPU custom op is available; skipping unavailability test")
-
-    execution.load_tables(resource)
-    with pytest.raises(RuntimeError, match="unavailable"):
-        execution.run(
-            torch.randn(2, 20),
-            torch.zeros(2, 1, 1, dtype=torch.int32),
-            torch.zeros(0),
-            0,
-            2,
-        )
-
-
-def test_npu_adapter_not_loaded_fails(tokenizer: MagicMock) -> None:
-    execution = NPUConstrainedTopKExecution(device="cpu")
-    with pytest.raises(RuntimeError, match="not loaded"):
-        execution.run(
-            torch.randn(2, 20),
-            torch.zeros(2, 1, 1, dtype=torch.int32),
-            torch.zeros(0),
-            0,
-            2,
-        )
-
-
 def test_run_rejects_logits_vocab_mismatch(tokenizer: MagicMock) -> None:
     resource = _build_resource(tokenizer)  # vocab_size=20
     execution = TorchConstrainedTopKExecution(device="cpu")
@@ -306,105 +273,6 @@ def test_run_rejects_decode_max_step_le_current_step(tokenizer: MagicMock) -> No
         execution.run(
             torch.randn(4, 20), torch.zeros(2, 2, 1, dtype=torch.int32), torch.zeros(0), 1, 2
         )
-
-
-@pytest.mark.parametrize("device_class", ["cpu", "accelerator"])  # type: ignore[misc]
-def test_npu_default_device_falls_back_without_crash(
-    tokenizer: MagicMock, device_class: str
-) -> None:
-    """On a non-Ascend torch build, torch.device('npu') raises; load must not crash."""
-    resource = _build_resource(tokenizer)
-    execution = NPUConstrainedTopKExecution()  # no device passed
-    # Classify the current default only when this case runs.  Collection must
-    # not initialize an accelerator merely to select a CI level.
-    try:
-        selected = execution._default_device().type
-        actual_class = "cpu" if selected == "cpu" else "accelerator"
-        if actual_class != device_class:
-            pytest.skip(f"default device is {actual_class}, not {device_class}")
-        execution.load_tables(resource)
-    except RuntimeError as exc:
-        if "npu" in str(exc).lower():
-            pytest.skip("torch build has no npu device type")
-        raise
-
-
-def test_npu_default_device_prefers_npu(
-    tokenizer: MagicMock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """NPUConstrainedTopKExecution must request prefer='npu' when no device given."""
-    from vllm_gr.constraints import execution as execution_module
-
-    resource = _build_resource(tokenizer)
-    captured: dict[str, Any] = {}
-
-    def fake_default_device(prefer: str | None = None) -> torch.device:
-        captured["prefer"] = prefer
-        return torch.device("cpu")
-
-    monkeypatch.setattr(execution_module, "_default_device", fake_default_device)
-    execution = NPUConstrainedTopKExecution()  # no device passed
-    execution.load_tables(resource)
-
-    assert captured.get("prefer") == "npu"
-
-
-def test_npu_adapter_passes_arguments_and_normalizes_dtype(
-    tokenizer: MagicMock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With a fake custom op, the NPU adapter must forward all args and emit int32."""
-    import vllm_gr.ops.npu.rec_constrained_topk as npu_ops
-
-    resource = _build_resource(tokenizer)
-    execution = NPUConstrainedTopKExecution(device="cpu")
-    execution.load_tables(resource)
-
-    captured: dict[str, Any] = {}
-
-    def fake_npu_op(*args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        # The real op returns (tokens, logprobs); return int64 tokens to verify
-        # the adapter normalizes to int32.
-        logits = args[0]
-        top_k = args[10]
-        rows = logits.shape[0]
-        return (
-            torch.zeros(rows, top_k, dtype=torch.int64),
-            torch.zeros(rows, top_k, dtype=torch.float32),
-        )
-
-    monkeypatch.setattr(npu_ops, "rec_constrained_topk_npu", fake_npu_op)
-    monkeypatch.setattr(npu_ops, "is_available", lambda: True)
-
-    logits = torch.randn(2, 20)
-    seq = torch.zeros(2, 1, 1, dtype=torch.int32)
-    temperatures = torch.zeros(1)
-    result = execution.run(logits, seq, temperatures, 0, 2)
-
-    # Positional contract of rec_constrained_topk_npu:
-    # 0 logits, 1 sequence_group, 2..7 tables (first_token_ids, prefix1_offsets,
-    # prefix1_values, prefix1_pair_keys, prefix2_value_offsets, prefix2_values),
-    # 8 temperatures, 9 current_step, 10 top_k, 11 max_prefix1_degree,
-    # 12 max_prefix2_degree.
-    args = captured["args"]
-    assert args[0] is logits
-    assert args[1] is seq
-    assert args[2] is execution._tables["first_token_ids"]  # noqa: SLF001
-    assert args[3] is execution._tables["prefix1_offsets"]  # noqa: SLF001
-    assert args[4] is execution._tables["prefix1_values"]  # noqa: SLF001
-    assert args[5] is execution._tables["prefix1_pair_keys"]  # noqa: SLF001
-    assert args[6] is execution._tables["prefix2_value_offsets"]  # noqa: SLF001
-    assert args[7] is execution._tables["prefix2_values"]  # noqa: SLF001
-    assert args[8] is temperatures
-    assert args[9] == 0  # current_step
-    assert args[10] == 2  # top_k
-    assert args[11] == resource.max_prefix1_degree
-    assert args[12] == resource.max_prefix2_degree
-    assert captured["kwargs"] == {}  # no stray keyword arguments
-
-    assert result.top_tokens.dtype == torch.int32  # normalized
-    assert result.top_logprobs.dtype == torch.float32
 
 
 def test_reset_allows_reload_with_new_digest(tokenizer: MagicMock) -> None:

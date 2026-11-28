@@ -11,7 +11,7 @@ level=${1:-pr}
 if [[ $# -gt 0 ]]; then shift; fi
 case "$level" in
   pr) expression='l1 or l2' ;;
-  pr-device) expression='l2 or (l1 and (gpu_test or npu_test))' ;;
+  pr-device) expression='l2 or (l1 and gpu_test)' ;;
   l1|l2|l3|l4|l5) expression="$level" ;;
   *) usage; exit 2 ;;
 esac
@@ -19,10 +19,9 @@ esac
 # Hardware tiers describe eligibility, while levels describe CI cost. Run
 # CPU tests alongside tests for the selected accelerator. A function-level
 # accelerator marker overrides a module-level cpu_test marker.
-cpu_expression='cpu_test and not gpu_test and not npu_test'
+cpu_expression='cpu_test and not gpu_test'
 case "${VLLM_GR_TARGET_DEVICE:-}" in
   cuda) expression="($expression) and (($cpu_expression) or gpu_test)" ;;
-  npu) expression="($expression) and (($cpu_expression) or npu_test)" ;;
   cpu) expression="($expression) and ($cpu_expression)" ;;
   '') ;;  # Preserve unfiltered local runs when no platform was selected.
   *) echo "Unsupported VLLM_GR_TARGET_DEVICE: $VLLM_GR_TARGET_DEVICE" >&2; exit 2 ;;

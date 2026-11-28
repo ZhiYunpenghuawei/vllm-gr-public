@@ -133,6 +133,20 @@ def normalize_backend_request(config: Any, integration: GRPlatform) -> BackendRe
 
 
 def resolve_backend_plan(integration: GRPlatform, request: BackendRequest) -> BackendPlan:
+    if request.has_constraint_table:
+        from vllm_gr.config import ConstraintBackendKind, constraint_backend_name
+
+        selector = request.config.to_dict()["constraint"]["table"]["backend"]
+        if selector not in (
+            ConstraintBackendKind.AUTO.value,
+            ConstraintBackendKind.PLATFORM.value,
+            constraint_backend_name(integration.canonical_constraint_backend),
+        ):
+            raise ValueError(
+                f"Constraint backend {selector!r} is not supported by the selected "
+                f"GR platform {integration.backend_id!r}; "
+                f"use {integration.canonical_constraint_backend!r} or 'auto'"
+            )
     plan = integration.resolve(request)
     if not isinstance(plan, BackendPlan):
         raise TypeError("Backend resolve() must return BackendPlan")

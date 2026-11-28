@@ -299,22 +299,11 @@ jobs:
         run: |
           device="gpu"
           board_id="unknown"
-          if command -v npu-smi > /dev/null 2>&1; then
-            device="npu"
-            board_id="$(
-              python -I -c 'import os, sys; sys.path.insert(0, os.path.join(os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest"), "python/site-packages")); import acl; print(acl.get_soc_name())' \
-                2>/dev/null || echo unknown
-            )"
-          fi
 
           if [[ "$POLICY_TARGET_BRANCH" == "main" ||
                 ( "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" && "$POLICY_TARGET_BRANCH" == "decode_graph" ) ]]; then
             # Preserve the manual decode_graph profile alongside main PR validation.
-            if [[ "$device" == "npu" && "$board_id" == "Ascend910_9362" ]]; then
-              board_id="decode_graph_Ascend910_9362"
-            else
-              board_id="decode_graph_${device}"
-            fi
+            board_id="decode_graph_${device}"
           fi
 
           args=(
@@ -375,12 +364,7 @@ jobs:
       - name: Create virtual environment
         if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          if [[ "$VLLM_GR_TARGET_DEVICE" == "npu" ]]; then
-            # The selected base Python must already contain the vendor runtime.
-            uv venv --seed --system-site-packages .venv
-          else
-            uv venv --seed .venv
-          fi
+          uv venv --seed .venv
 
       - name: Set up virtual environment
         run: |
@@ -512,11 +496,7 @@ jobs:
       - name: Create virtual environment
         if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          if [[ "$VLLM_GR_TARGET_DEVICE" == "npu" ]]; then
-            uv venv --seed --system-site-packages .venv
-          else
-            uv venv --seed .venv
-          fi
+          uv venv --seed .venv
 
       - name: Set up virtual environment
         run: |

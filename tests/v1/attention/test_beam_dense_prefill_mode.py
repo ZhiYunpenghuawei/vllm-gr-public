@@ -18,28 +18,26 @@ def _config(prefix_caching=False, chunked=False, kv_transfer=None, *, mode=None)
 
 
 @pytest.mark.parametrize(
-    "raw,cuda,config,expected",
+    "raw,config,expected",
     [
-        (None, True, _config(), None),
-        ("off", True, _config(), None),
-        ("fa2", True, _config(), "fa2"),
-        ("cudnn", True, _config(), "cudnn"),
-        ("cudnn", False, _config(), None),
+        (None, _config(), None),
+        ("off", _config(), None),
+        ("fa2", _config(), "fa2"),
+        ("cudnn", _config(), "cudnn"),
         # Cached context lives only in the paged cache.
-        ("cudnn", True, _config(prefix_caching=True), None),
-        ("cudnn", True, _config(chunked=True), None),
-        ("cudnn", True, _config(kv_transfer=SimpleNamespace(kv_connector="X")), None),
-        ("cudnn", True, None, None),
+        ("cudnn", _config(prefix_caching=True), None),
+        ("cudnn", _config(chunked=True), None),
+        ("cudnn", _config(kv_transfer=SimpleNamespace(kv_connector="X")), None),
+        ("cudnn", None, None),
     ],
 )
-def test_dense_prefill_mode_requires_fresh_prompts(monkeypatch, raw, cuda, config, expected):
+def test_dense_prefill_mode_requires_fresh_prompts(monkeypatch, raw, config, expected):
     import vllm.config
 
     monkeypatch.setattr(beam_attn.envs, "VLLM_BATCH_INVARIANT", False)
 
     if config is not None:
         config.additional_config = _config(mode=raw).additional_config
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", cuda)
     monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: config)
     assert beam_attn._resolve_dense_prefill_mode() == expected
 
@@ -47,7 +45,6 @@ def test_dense_prefill_mode_requires_fresh_prompts(monkeypatch, raw, cuda, confi
 def test_dense_prefill_mode_off_when_batch_invariant(monkeypatch):
     import vllm.config
 
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
     config = _config(mode="cudnn")
     monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: config)
     monkeypatch.setattr(beam_attn.envs, "VLLM_BATCH_INVARIANT", True)

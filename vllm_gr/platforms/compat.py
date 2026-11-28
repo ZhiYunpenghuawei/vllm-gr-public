@@ -9,8 +9,6 @@ from importlib import metadata
 # Exact versions supported by the in-tree integrations. The CI resolver reads
 # these literals without importing the target checkout.
 SUPPORTED_VLLM_VERSION = "0.30.0"
-SUPPORTED_VLLM_ASCEND_VERSION = "0.30.0rc2"
-SUPPORTED_TRITON_ASCEND_VERSION = "3.6.0"
 
 
 def installed_version(distribution: str) -> str | None:

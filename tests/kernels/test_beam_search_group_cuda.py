@@ -98,11 +98,7 @@ def test_group_cuda_matches_fixed_extent_torch(
         (1024, 256),
     ],
 )
-# Step 0 is excluded on purpose: the torch reference implements the NPU legacy
-# init contract there (all-zero outputs plus the first sequence entry), while
-# the CUDA bootstrap selects the best valid candidates from the first parent.
-# The initialization-contract divergence predates K/W decoupling; test the
-# CUDA contract independently below.
+# Test the one-parent Prefill bootstrap separately below.
 @pytest.mark.parametrize("current_step", [1, 2])
 def test_group_cuda_matches_torch_across_candidate_widths(
     beam_width: int,

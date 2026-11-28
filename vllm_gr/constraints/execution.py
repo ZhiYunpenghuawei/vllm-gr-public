@@ -17,9 +17,6 @@ Design rules:
 - ``load_tables`` copies the NumPy tables to device tensors (the resource
   arrays are read-only bytes-backed) and is idempotent by digest: same digest
   reuses, a different digest is rejected rather than silently replaced.
-- The NPU adapter calls ``rec_constrained_topk_npu`` directly and fails
-  explicitly when the custom op is unavailable; it never silently falls back
-  to Torch.
 """
 
 from __future__ import annotations
@@ -32,10 +29,8 @@ import torch
 
 # Single source of truth for the operator's legacy padding payload. Structural
 # validity is carried separately and never inferred from this numeric value.
-from vllm_gr.config.models import MAX_CONSTRAINT_CANDIDATE_WIDTH
 from vllm_gr.constraints.compiler import validate_resource_tables
 from vllm_gr.constraints.scoring import INVALID_LOGIT as _INVALID_LOGIT
-from vllm_gr.constraints.table import token_id_window
 from vllm_gr.constraints.validity import (
     constraint_candidate_counts,
     valid_mask_from_counts,
@@ -145,7 +140,7 @@ def _tables_to_device(
 
 
 class _ConstrainedTopKExecutionBase:
-    """Shared table lifecycle for the Torch and NPU adapters.
+    """Shared table lifecycle for the execution adapters.
 
     Owns the loaded-table state and the digest-keyed idempotent lifecycle:
 
@@ -321,123 +316,6 @@ class TorchConstrainedTopKExecution(_ConstrainedTopKExecutionBase):
         )
 
 
-class CUDAConstrainedTopKExecution(_ConstrainedTopKExecutionBase):
-    """CUDA constrained Top-K backed by the Triton lookup/gather kernel."""
-
-    def load_tables(self, resource: "ConstraintTableResource") -> None:
-        from vllm_gr.ops.cuda.rec_constrained_topk import validate_cuda_sort_capacity
-
-        if self._digest == resource.digest:
-            return
-        validate_cuda_sort_capacity(
-            int(resource.first_token_ids.size),
-            resource.max_prefix1_degree,
-            resource.max_prefix2_degree,
-        )
-        super().load_tables(resource)
-        self._vocab_slice = token_id_window(
-            resource.first_token_ids, resource.prefix1_values, resource.prefix2_values
-        )
-
-    def is_available(self) -> bool:
-        return torch.cuda.is_available()
-
-    def _default_device(self) -> torch.device:
-        return _default_device(prefer="cuda")
-
-    def _vocab_window(self, logits: torch.Tensor) -> tuple[int, int]:
-        """Resolve ``(offset, full_vocab_size)`` for full or sliced logits."""
-
-        if self._vocab_size is None:
-            raise RuntimeError("loaded constraint tables are missing vocab_size")
-        if logits.shape[1] == self._vocab_size:
-            return 0, self._vocab_size
-
-        offset, slice_size = self._vocab_slice
-        if logits.shape[1] != slice_size:
-            raise ValueError(
-                f"CUDA constraint logits width {logits.shape[1]} must match the table "
-                f"vocabulary {self._vocab_size} or its token window {slice_size}"
-            )
-        return offset, self._vocab_size
-
-    def _expected_logits_vocab_size(self, logits: torch.Tensor) -> int:
-        self._vocab_window(logits)
-        return int(logits.shape[1])
-
-    def _call_op(
-        self,
-        logits: torch.Tensor,
-        sequence_group: torch.Tensor,
-        temperatures: torch.Tensor,
-        current_step: int,
-        top_k: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm_gr.ops.cuda.rec_constrained_topk import rec_constrained_topk_cuda
-
-        vocab_offset, table_vocab_size = self._vocab_window(logits)
-        tokens, logprobs, _, _ = rec_constrained_topk_cuda(
-            logits,
-            sequence_group,
-            self._tables["first_token_ids"],
-            self._tables["prefix1_offsets"],
-            self._tables["prefix1_values"],
-            self._tables["prefix1_pair_keys"],
-            self._tables["prefix2_value_offsets"],
-            self._tables["prefix2_values"],
-            temperatures,
-            current_step,
-            top_k,
-            self._max_degrees["max_prefix1_degree"],
-            self._max_degrees["max_prefix2_degree"],
-            vocab_offset=vocab_offset,
-            table_vocab_size=table_vocab_size,
-        )
-        return tokens, logprobs
-
-
-class NPUConstrainedTopKExecution(_ConstrainedTopKExecutionBase):
-    """NPU constrained top-k backed by the fused ``custom_ops_lib`` operator.
-
-    Calls ``rec_constrained_topk_npu`` directly and fails explicitly when the
-    custom op is unavailable; it never silently falls back to Torch.
-    """
-
-    def is_available(self) -> bool:
-        from vllm_gr.ops.npu.rec_constrained_topk import is_available
-
-        return is_available()
-
-    def _default_device(self) -> torch.device:
-        return _default_device(prefer="npu")
-
-    def _call_op(
-        self,
-        logits: torch.Tensor,
-        sequence_group: torch.Tensor,
-        temperatures: torch.Tensor,
-        current_step: int,
-        top_k: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm_gr.ops.npu.rec_constrained_topk import rec_constrained_topk_npu
-
-        return rec_constrained_topk_npu(
-            logits,
-            sequence_group,
-            self._tables["first_token_ids"],
-            self._tables["prefix1_offsets"],
-            self._tables["prefix1_values"],
-            self._tables["prefix1_pair_keys"],
-            self._tables["prefix2_value_offsets"],
-            self._tables["prefix2_values"],
-            temperatures,
-            current_step,
-            top_k,
-            self._max_degrees["max_prefix1_degree"],
-            self._max_degrees["max_prefix2_degree"],
-        )
-
-
 def _validate_runtime_inputs(
     *,
     logits: torch.Tensor,
@@ -455,8 +333,8 @@ def _validate_runtime_inputs(
         raise ValueError(f"unsupported current_step={current_step}; expected 0, 1, or 2")
     if not isinstance(top_k, int) or isinstance(top_k, bool):
         raise ValueError(f"top_k must be an int, got {type(top_k).__name__}")
-    if not (1 <= top_k <= MAX_CONSTRAINT_CANDIDATE_WIDTH):
-        raise ValueError(f"top_k must be in [1, {MAX_CONSTRAINT_CANDIDATE_WIDTH}], got {top_k}")
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}")
     _validate_input_dtypes(logits, sequence_group, temperatures, tables)
     _validate_shapes(logits, sequence_group, current_step, vocab_size)
     _validate_same_device(logits, sequence_group, temperatures)
@@ -498,28 +376,12 @@ def _validate_input_dtypes(
 
 
 def _default_device(prefer: str | None = None) -> torch.device:
-    """Pick a sensible default device, honouring an explicit preference.
-
-    ``prefer`` names a device type (``"npu"``, ``"cuda"``, ``"cpu"``).  When a
-    type is requested it is returned regardless of availability so an NPU
-    adapter never accidentally lands tables on CPU while logits are on NPU
-    (which would make the operator fail with a device mismatch).  Without a
-    preference, fall back to CUDA then CPU.
-    """
-    if prefer == "npu":
-        try:
-            return torch.device("npu")
-        except RuntimeError:
-            # torch on non-Ascend builds does not recognise the "npu" device
-            # type; fall through to the generic default.
-            pass
-    if prefer == "cuda":
-        return torch.device("cuda")
-    if prefer == "cpu":
-        return torch.device("cpu")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
+    """Pick a sensible default device, honouring an explicit preference."""
+    return (
+        torch.device(prefer)
+        if prefer
+        else (torch.accelerator.current_accelerator(check_available=True) or torch.device("cpu"))
+    )
 
 
 def _validate_shapes(

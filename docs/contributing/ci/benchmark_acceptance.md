@@ -9,7 +9,7 @@ branch. See [pull request checks](pr_merge_loop.md#pull-request-ci) for the CI r
 | Workload | When it runs | What it checks |
 | --- | --- | --- |
 | [OneRec five-task Recall](#gpu-five-task-recall) | GPU PR validation targeting `main` and eligible manual GPU runs | Per-task SID Recall@32, input identity and graph replay |
-| [OneRec Video-100](#npu-video-100) | NPU and other manual GPU runs | Offline and HTTP accuracy and performance under the resolved policy |
+| [OneRec Video-100](#npu-video-100) | Manual GPU runs; NPU values retained for historical comparison | Offline and HTTP accuracy and performance under the resolved policy |
 
 The OneRec decode job must succeed for full validation to pass.
 
@@ -25,7 +25,7 @@ Its summary records the tested commit, policy SHA-256 and effective thresholds.
 ### Policy selection
 
 The workflow selects the shared or default GPU policy based on the target
-branch. NPU runs use shared accuracy floors and retain board-specific
+branch. Historical NPU profiles use shared accuracy floors and retain board-specific
 performance settings. The policy summary records the effective thresholds.
 
 ### GPU five-task Recall
@@ -53,6 +53,10 @@ V1_RECALL_BASELINE_FILE="$PWD/benchmarks/beam_search/recall_baseline_batch4.json
 ```
 
 ### NPU Video-100
+
+The NPU gate is not executed by this core checkout. The accepted policy
+and reference floors below are retained as historical evidence, not current
+NPU runtime or acceptance claims.
 
 The [Video-100 runner](../../../tests/system/run_benchmark_and_verify.sh) evaluates
 100 video prompts offline and over HTTP at beam width 128. Both measurements

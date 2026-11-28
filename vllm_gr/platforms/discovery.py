@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from importlib import metadata
 from inspect import signature
@@ -40,6 +41,18 @@ def _after_fork() -> None:
     global _lock, _selection, _resolving
     # A different thread could have owned the lock in the parent.
     _lock = RLock()
+    # The parent may have installed its GR instance as the process platform.
+    # Rediscover the child integration from the original native identity,
+    # not from that inherited GR wrapper. Do not import modules in this hook.
+    selection = _selection
+    native_module = sys.modules.get("vllm.platforms")
+    if (
+        selection is not None
+        and selection.platform is not None
+        and native_module is not None
+        and vars(native_module).get("current_platform") is selection.platform
+    ):
+        native_module.current_platform = selection.native
     _selection = None
     _resolving = False
 
@@ -155,7 +168,10 @@ def selected_platform() -> GRPlatform:
 
     global _selection, _resolving
     with _lock:
-        if _selection is None or _selection.native is not current_platform:
+        if _selection is None or (
+            _selection.native is not current_platform
+            and _selection.platform is not current_platform
+        ):
             if _resolving:
                 raise RuntimeError("Recursive GR platform discovery")
             _resolving = True

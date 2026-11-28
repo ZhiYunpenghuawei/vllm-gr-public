@@ -94,7 +94,6 @@ for module in (
     "cuda.v1.gpu_model_runner_patch",
     "cuda.v2.gpu_model_runner_v2_patch",
     "cuda.v2.gpu_model_runner_v2_resources",
-    "npu.npu_model_runner_patch",
 ):
     spec = find_spec(f"{worker_package}.{module}")
     if spec is None or not spec.origin or not Path(spec.origin).resolve().is_relative_to(install_dir):
@@ -133,15 +132,17 @@ if not overridden and sdist_metadata.is_file():
 elif not overridden:
     local = Version(version).local
     suffix = local.split(".")[-1] if local else None
-    if target in {"cpu", "npu"} and suffix != target:
+    if target == "cpu" and suffix != target:
         raise SystemExit(f"{target} wheel has wrong version suffix: {version}")
-    if target == "cuda" and suffix in {"cpu", "npu"}:
+    if target == "cuda" and suffix == "cpu":
         raise SystemExit(f"CUDA wheel has wrong version suffix: {version}")
+if {"vllm-ascend", "torch-npu", "triton-ascend"} & requirements.keys():
+    raise SystemExit("core wheel unexpectedly depends on the legacy Ascend runtime")
 if "regex" not in requirements:
     raise SystemExit("wheel is missing its direct regex dependency")
 if target == "cuda" and requirements.get("vllm") != "==0.30.0":
     raise SystemExit(f"CUDA wheel has wrong vLLM requirement: {requirements.get('vllm')}")
-if target in {"cpu", "npu"} and "vllm" in requirements:
+if target == "cpu" and "vllm" in requirements:
     raise SystemExit(f"{target} wheel unexpectedly depends on vLLM")
 print(f"vllm-gr {version} from {origin}")
 PY

@@ -12,6 +12,7 @@ import triton.language as tl
 
 from vllm_gr.config.models import MAX_BEAM_WIDTH, MAX_CANDIDATE_WIDTH
 from vllm_gr.ops.cuda.topk_sort_key import unpack_score
+from vllm_gr.ops.onerec_decode import UnsupportedSurvivorCountError
 
 # Triton JIT functions intentionally use its untyped DSL values.
 # mypy: disable-error-code="misc,no-untyped-def"
@@ -1141,6 +1142,78 @@ def beam_search_rec_final_select_cuda(
         scratch.merge_flat_indices,
         candidate_valid_mask,
     )
+
+
+def _beam_search_rec_final_select_cuda_dispatch(
+    log_probs: torch.Tensor,
+    top_tokens: torch.Tensor,
+    top_probs: torch.Tensor,
+    sequence: torch.Tensor,
+    current_step: int,
+    result_width: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return beam_search_rec_final_select_cuda(
+        log_probs,
+        top_tokens,
+        top_probs,
+        sequence,
+        current_step,
+        result_width,
+    )
+
+
+def _beam_search_group_cuda_dispatch(
+    log_probs: torch.Tensor,
+    top_tokens: torch.Tensor,
+    top_probs: torch.Tensor,
+    sequence: torch.Tensor,
+    current_step: int,
+    top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # The CUDA group operator is fixed-width: it always emits exactly one
+    # survivor per beam row (``W``), and its ``candidate_width`` argument
+    # selects the column extent ``K``, which it reads from the tensors.  So
+    # ``K`` needs no plumbing here, but ``top_k`` -- the survivor count, the
+    # torch convention -- cannot be honoured.  Raise instead of dropping it:
+    # a silent ``del`` would make a narrower selection look supported while
+    # returning ``W`` winners.
+    #
+    # Validate in the order the callee did before K was read from the tensors:
+    # tensors and current_step first (the same validator, so malformed inputs
+    # get its ValueError/TypeError rather than an IndexError from ``shape[1]``),
+    # then the type of top_k (``8.0 != 8`` is False, so the width comparison
+    # alone would accept a float), then the width itself.
+    _, beam_width, candidate_width, _ = _validate_beam_inputs(
+        log_probs, top_tokens, top_probs, sequence, current_step, None
+    )
+    if current_step not in (0, 1, 2):
+        raise ValueError("CUDA BeamSearchGroup supports current_step 0, 1, or 2")
+    if isinstance(top_k, bool) or not isinstance(top_k, int):
+        raise TypeError("top_k must be an int")
+    # A non-positive survivor count is invalid rather than merely unsupported.
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    if top_k != beam_width:
+        raise UnsupportedSurvivorCountError(
+            "CUDA beam_search_group always emits beam_width survivors; "
+            f"got top_k={top_k}, beam_width={beam_width}. Narrow the width "
+            "through dynamic_beam_widths/beam_state.select instead."
+        )
+    return beam_search_group_cuda(
+        log_probs,
+        top_tokens,
+        top_probs,
+        sequence,
+        current_step,
+        candidate_width,
+    )
+
+
+# CUDA implementations register against the portable schemas from
+# onerec_decode. Keeping the library alive owns these registrations.
+_CUDA_OP_LIBRARY = torch.library.Library("vllm_gr", "IMPL", "CUDA")
+_CUDA_OP_LIBRARY.impl("beam_search_rec_final_select", _beam_search_rec_final_select_cuda_dispatch)
+_CUDA_OP_LIBRARY.impl("beam_search_group", _beam_search_group_cuda_dispatch)
 
 
 __all__ = [

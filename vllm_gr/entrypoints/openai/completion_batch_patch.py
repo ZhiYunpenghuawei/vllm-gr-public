@@ -176,7 +176,7 @@ def _batch_decline_reason(
         and len(engine_inputs) > decode_capacity
     ):
         return (
-            f"NPU Decode batch size {len(engine_inputs)} exceeds the physical input "
+            f"Decode batch size {len(engine_inputs)} exceeds the physical input "
             f"capacity of {decode_capacity} prompts at the requested beam width"
         )
     return None

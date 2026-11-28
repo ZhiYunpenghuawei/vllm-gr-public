@@ -63,6 +63,13 @@ def _load_setup_module() -> _SetupModule:
     return cast(_SetupModule, module)
 
 
+def test_removed_install_target_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    gr_setup = _load_setup_module()
+    monkeypatch.setenv("VLLM_GR_TARGET_DEVICE", "npu")
+    with pytest.raises(ValueError, match="Unsupported VLLM_GR_TARGET_DEVICE"):
+        gr_setup.get_install_requires()
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     ("device", "expected_subset", "expected_packages", "excluded_packages"),
     [
@@ -82,12 +89,6 @@ def _load_setup_module() -> _SetupModule:
             },
             {"msgspec", "regex", "safetensors", "pyyaml", "vllm"},
             set(),
-        ),
-        (
-            "npu",
-            {"msgspec", "regex", "safetensors>=0.6.2", "PyYAML>=6.0"},
-            {"msgspec", "regex", "safetensors", "pyyaml"},
-            {"vllm"},
         ),
     ],
 )
@@ -183,7 +184,7 @@ def _assert_version(module: _SetupModule, expected: str) -> None:
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize("device", ["cuda", "npu", "cpu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda", "cpu"])  # type: ignore[misc]
 def test_release_version_by_device(version_source: _SetupModule, device: str) -> None:
     version_source._cached_device = device
     suffix = "" if device == "cuda" else f"+{device}"
@@ -194,10 +195,10 @@ def test_release_version_by_device(version_source: _SetupModule, device: str) ->
 def test_git_version_source(version_source: _SetupModule, release_tag: str | None) -> None:
     root = version_source.ROOT_DIR
     _init_git(root)
-    version_source._cached_device = "npu"
+    version_source._cached_device = "cpu"
     if release_tag:
         _git(root, "tag", f"v{release_tag}")
-        _assert_version(version_source, f"{release_tag}+npu")
+        _assert_version(version_source, f"{release_tag}+cpu")
 
     next_release = {None: "0.30.0", "0.30.1": "0.30.2", "0.30.1rc1": "0.30.1rc2"}[release_tag]
     versions = []
@@ -205,16 +206,16 @@ def test_git_version_source(version_source: _SetupModule, release_tag: str | Non
         _git(root, "commit", "--allow-empty", "-qm", f"Development commit {step}")
         node = _git_output(root, "rev-parse", "--short=12", "HEAD").strip()
         distance = step if release_tag else step + 1
-        expected = f"{next_release}.dev{distance}+g{node}.npu"
+        expected = f"{next_release}.dev{distance}+g{node}.cpu"
         _assert_version(version_source, expected)
         versions.append(Version(expected))
     assert versions[0] < versions[1]
     (root / ".gitignore").write_text("vllm_gr/_version.py\n*.log\n")
-    _assert_version(version_source, expected.removesuffix(".npu") + ".dirty.npu")
+    _assert_version(version_source, expected.removesuffix(".cpu") + ".dirty.cpu")
 
 
 def test_repeated_version_generation_does_not_leak_override(version_source: _SetupModule) -> None:
-    for device, expected in [("cpu", "0.30.0+cpu"), ("npu", "0.30.0+npu"), ("cuda", "0.30.0")]:
+    for device, expected in [("cpu", "0.30.0+cpu"), ("cuda", "0.30.0")]:
         version_source._cached_device = device
         _assert_version(version_source, expected)
 
@@ -268,7 +269,7 @@ def test_failed_version_write_restores_override(
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize("source_version", ["0.30.1", "0.30.1+cpu", "0.30.1+npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("source_version", ["0.30.1", "0.30.1+cpu"])  # type: ignore[misc]
 def test_sdist_version_is_authoritative_across_devices(
     version_source: _SetupModule, source_version: str
 ) -> None:
@@ -277,7 +278,7 @@ def test_sdist_version_is_authoritative_across_devices(
     (version_source.ROOT_DIR / "PKG-INFO").write_text(
         f"Metadata-Version: 2.1\nName: vllm-gr\nVersion: {source_version}\n"
     )
-    for device in ("cuda", "npu", "cpu"):
+    for device in ("cuda", "cpu"):
         version_source._cached_device = device
         _assert_version(version_source, source_version)
 
@@ -296,7 +297,7 @@ def package_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copytree(REPO_ROOT / "requirements", source / "requirements")
     (source / "vllm_gr").mkdir()
     (source / "vllm_gr" / "__init__.py").write_text("from ._version import __version__\n")
-    for name in ("vllm_gr/platforms/compat.py", "vllm_gr/platforms/ascend/environment.py"):
+    for name in ("vllm_gr/platforms/compat.py",):
         target = source / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / name, target)
@@ -316,7 +317,7 @@ def package_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.parametrize(  # type: ignore[misc]
     ("source_device", "device"),
-    [("cuda", "cuda"), ("npu", "npu"), ("cpu", "cpu"), ("cpu", "cuda"), ("cuda", "npu")],
+    [("cuda", "cuda"), ("cpu", "cpu"), ("cpu", "cuda"), ("cuda", "cpu")],
 )
 def test_sdist_wheel_metadata(
     tmp_path: Path,
@@ -389,6 +390,7 @@ def test_sdist_wheel_metadata(
     runtime = [str(req) for req in requirements if req.name == "vllm" and req.marker is None]
     assert runtime == ([_requirement_line("cuda", "vllm")] if device == "cuda" else [])
     assert not any(req.name == "black" for req in requirements)
+    assert not ({"vllm-ascend", "torch-npu", "triton-ascend"} & {req.name for req in requirements})
 
 
 def test_tagged_editable_install_runtime_verify(

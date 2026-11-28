@@ -19,12 +19,14 @@ from vllm_gr.v1.attention.backends.beam_attn_gpu import (
     validate_short_suffix_attention,
 )
 from vllm_gr.v1.attention.backends.beam_attn_metadata import BeamAttentionMetadata
-from vllm_gr.v1.beam.attention_context import BeamAttentionContext
+from vllm_gr.v1.worker.cuda.attention_context import (
+    CudaBeamAttentionContext as BeamAttentionContext,
+)
 
 
 @pytest.fixture
 def flash_backend(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    # Policy tests must not import CUDA extensions on NPU or depend on local GPUs.
+    # Policy tests must not import CUDA extensions or depend on local GPUs.
     flash = ModuleType("vllm.vllm_flash_attn.flash_attn_interface")
     monkeypatch.setattr(flash, "is_fa_version_supported", lambda version: True, raising=False)
     monkeypatch.setattr(
@@ -36,7 +38,7 @@ def flash_backend(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
 def test_short_suffix_import_does_not_require_gluon() -> None:
     # Use a fresh interpreter so a Gluon import from another test cannot hide
-    # the regression. NPU Triton builds may ship an incompatible Gluon module.
+    # the regression on a host lacking Gluon.
     result = subprocess.run(
         [
             sys.executable,
@@ -139,7 +141,6 @@ def _short_suffix_engine_config(
     *,
     enabled: bool | None = None,
     width: int | None = 128,
-    cuda: bool = True,
     fa_version: Literal[2, 3, 4] | None = None,
     custom: bool = True,
 ) -> tuple[SimpleNamespace, SimpleNamespace]:
@@ -172,7 +173,7 @@ def _short_suffix_engine_config(
     monkeypatch.setattr(
         arg_utils_gr,
         "engine_config_service",
-        lambda: platform_config_service("cuda" if cuda else "npu"),
+        lambda: platform_config_service("cuda"),
     )
     return config, args
 
@@ -190,8 +191,6 @@ def _short_suffix_engine_config(
         ({"enabled": False, "fa_version": 4}, 4),
         ({"width": None}, None),
         ({"width": None, "fa_version": 3}, 3),
-        ({"cuda": False}, None),
-        ({"cuda": False, "fa_version": 3}, 3),
         ({"custom": False}, None),
         ({"custom": False, "fa_version": 3}, 3),
     ],
@@ -264,9 +263,7 @@ def test_fusion_preserves_platform_auto_selection(
     monkeypatch.setattr(
         flash_backend, "is_fa_version_supported", lambda version: version in (2, default_version)
     )
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", False)
-    monkeypatch.setattr(beam_attn, "_get_platform_execution_module", lambda: beam_attn_gpu)
+    monkeypatch.setattr(beam_attn, "_get_cuda_execution_module", lambda: beam_attn_gpu)
     # Exercise the installed vLLM selector, including device fallbacks.
     if fa_version == 3 and capability == 8:
         pytest.skip("explicit FA3 is not supported on SM8x")
@@ -717,14 +714,12 @@ def test_cascade_rejects_multi_query_beams_without_writing_outputs(
     assert torch.isnan(case.session.suffix_v_buf).all()
 
 
-@pytest.mark.parametrize("cuda", [False, True])
 @pytest.mark.parametrize("width", [None, 128])
 @pytest.mark.parametrize("enabled", [None, False, True])
 def test_layer_constructor_validates_before_execution(
     monkeypatch: pytest.MonkeyPatch,
     enabled: bool | None,
     width: int | None,
-    cuda: bool,
     flash_backend: ModuleType,
 ) -> None:
     import vllm.config
@@ -741,11 +736,9 @@ def test_layer_constructor_validates_before_execution(
         **({"enable_short_suffix_attention": enabled} if enabled is not None else {}),
     ).write_to_vllm_config(config)
     monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: config)
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", cuda)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", not cuda)
     monkeypatch.setattr(
         beam_attn,
-        "_get_platform_execution_module",
+        "_get_cuda_execution_module",
         lambda: SimpleNamespace(get_flash_attn_version=lambda **kwargs: 2),
     )
     kwargs: dict[str, Any] = {
@@ -758,11 +751,8 @@ def test_layer_constructor_validates_before_execution(
         "kv_cache_dtype": "auto",
         "logits_soft_cap": 10.0,
     }
-    active = cuda and width is not None and enabled is not False
-    if not cuda:
-        with pytest.raises(NotImplementedError, match="logits_soft_cap"):
-            beam_attn.BeamAttentionImpl(**kwargs)
-    elif active:
+    active = width is not None and enabled is not False
+    if active:
         with pytest.raises(ValueError, match="softcap"):
             beam_attn.BeamAttentionImpl(**kwargs)
     else:
@@ -812,7 +802,7 @@ def test_fused_suffix_uses_the_fa2_emulating_kernel_for_every_prefix_backend(
         alibi_slopes=None,
         sinks=None,
     )
-    # The Gluon-based fast kernel does not import on NPU Triton builds, so stub
+    # The Gluon-based fast kernel does not import on every host, so stub
     # the module instead of importing it; the routing decision is what matters.
     fast = ModuleType("vllm_gr.v1.attention.backends.beam_short_suffix_fa2")
     calls: list[tuple[Any, ...]] = []

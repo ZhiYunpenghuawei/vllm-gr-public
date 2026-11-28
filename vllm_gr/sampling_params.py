@@ -30,11 +30,11 @@ class BeamSearchParams(
     # historical "fill"; the Constraint Table backend rejects an explicit
     # value because candidate validity is enforced in the Worker.
     catalog_strategy: str | None = None
-    # CUDA/NPU V1. Each entry is the number of winners retained after that
+    # Beam execution. Each entry is the number of winners retained after that
     # generated token; beam_width remains the fixed storage capacity.
     dynamic_beam_widths: list[int] | None = None
     result_width: int | None = None
-    # CUDA V1 only. Per-parent candidate count for each generated token.
+    # Per-parent candidate count for each generated token.
     # When omitted, the historical K=W behavior is preserved.
     per_parent_beam_widths: list[int] | None = None
 

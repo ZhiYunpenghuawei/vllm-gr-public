@@ -85,7 +85,7 @@ for module_name in (
     assert module_name not in sys.modules, module_name
 
 from vllm_gr.platforms.table import BUILTIN_PROBES
-assert set(BUILTIN_PROBES) == {"cuda", "ascend"}
+assert set(BUILTIN_PROBES) == {"cuda"}
 assert "torch" not in sys.modules and "vllm" not in sys.modules
 
 from tests.helpers.native_platform import native_platform
@@ -150,29 +150,47 @@ with patch.object(metadata, "entry_points", side_effect=current_group_only):
 def test_cuda_plugin_initialization_does_not_import_ascend() -> None:
     project_root = REPO_ROOT
     code = """
+import importlib.abc
+import os
 import sys
 
-# On Ascend images, importing torch autoloads the torch_npu device backend
-# (torch >= 2.10 entry-point auto-loading) and importing vllm activates the
-# vendor ascend platform plugin during platform detection. Those vendor
-# imports are properties of the machine image, not of vllm-gr's backend
-# selection, so they cannot be forbidden here. The enforceable isolation
-# contract is that vllm-gr's own Ascend integration stays unloaded while the
-# CUDA integration initializes.
-blocked = (
-    "vllm_gr.platforms.ascend.config_patch",
-    "vllm_gr.platforms.ascend.spawn_patch",
-    "vllm_gr.v1.worker.npu.startup_patch",
-    "vllm_gr.v1.worker.npu.kv_layout_patch",
+os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+os.environ["VLLM_PLUGINS"] = ""
+vendor_packages = (
+    "torch_npu",
+    "vllm_ascend",
+)
+retired_gr_modules = (
+    "vllm_gr.v1.ascend_compat",
+    "vllm_gr.platforms.ascend",
+    "vllm_gr.v1.worker.npu",
+    "vllm_gr.ops.npu",
+    "vllm_gr.v1.attention.backends.beam_attn_npu",
 )
 
-def reject_ascend(event, args):
-    # Metadata probes (find_spec) are allowed; importing the GR Ascend
-    # integration is not.
-    if event == "import" and args[0] in blocked:
-        raise AssertionError(f"unselected backend imported: {args[0]}")
+def forbidden(name):
+    return any(
+        name == mod or name.startswith(mod + ".")
+        for mod in vendor_packages + retired_gr_modules
+    )
 
-sys.addaudithook(reject_ascend)
+# Upstream dependencies can legitimately probe whether optional vendor packages
+# are installed. A find_spec call is not an import. Reject actual import events
+# and check sys.modules after initialization, while retaining the import finder
+# guard for the removed GR modules.
+def reject_vendor_import(event, args):
+    if event == "import" and forbidden(args[0]):
+        raise AssertionError(f"retired backend imported: {args[0]}")
+
+class RejectLegacyAscend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if any(
+            fullname == mod or fullname.startswith(mod + ".") for mod in retired_gr_modules
+        ):
+            raise AssertionError(f"retired backend imported: {fullname}")
+
+sys.addaudithook(reject_vendor_import)
+sys.meta_path.insert(0, RejectLegacyAscend())
 import vllm.platforms
 from tests.helpers.cuda_platform import CudaGRPlatform
 from vllm.platforms.cuda import CudaPlatform
@@ -192,11 +210,13 @@ vllm.platforms.current_platform = platform
 from vllm_gr.plugin import initialize_runtime
 first = initialize_runtime()
 assert first["patch_count"] > 0, first
+assert first["platform_seam"] is True, first
 assert set(first["patches"].values()) == {"applied"}, first
 second = initialize_runtime()
 assert second["patch_count"] == 0, second
+assert second["platform_seam"] is False, second
 assert set(second["patches"].values()) == {"already_applied"}, second
-assert not any(name in sys.modules for name in blocked)
+assert not any(forbidden(name) for name in sys.modules)
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -290,10 +310,10 @@ pytestmark = pytest.mark.cpu_test
 def test_runner_contracts_import_stays_hardware_free() -> None:
     code = """
 import sys
-from vllm_gr.v1.worker import cuda, model_runner_contracts, npu, stage_binding
+from vllm_gr.v1.worker import cuda, model_runner_contracts, stage_binding
 from vllm_gr.v1.worker.cuda import v1, v2
 
-for package in (cuda, v1, v2, npu):
+for package in (cuda, v1, v2):
     assert not any(
         name.startswith(package.__name__ + ".")
         and (package is not cuda or name not in (v1.__name__, v2.__name__))
@@ -327,20 +347,31 @@ import sys
 os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
 os.environ["VLLM_PLUGINS"] = ""
 
-for suffix in (
-    "worker.gr_execution",
-    "worker.model_runner_common",
-    "worker.model_runner_patch",
-    "worker.gr_startup",
-    "worker.runner_binding",
-    "engine.worker_readiness",
+for module in (
+    "vllm_gr.config.models",
+    "vllm_gr.platforms.admission",
+    "vllm_gr.constraints.loader",
+    "vllm_gr.constraints.execution",
+    "vllm_gr.ops.onerec_decode",
+    "vllm_gr.ops.rec_constrained_topk",
+    "vllm_gr.v1.beam.attention_context",
+    "vllm_gr.v1.beam.reorder",
+    "vllm_gr.v1.worker.gr_execution",
+    "vllm_gr.v1.worker.model_runner_common",
+    "vllm_gr.v1.worker.model_runner_patch",
+    "vllm_gr.v1.worker.gr_startup",
+    "vllm_gr.v1.worker.runner_binding",
+    "vllm_gr.v1.engine.worker_readiness",
+    "vllm_gr.v1.engine.hot_update",
 ):
-    importlib.import_module("vllm_gr.v1." + suffix)
+    importlib.import_module(module)
 
 unexpected = [
     name for name in sys.modules
-    if name.startswith(("vllm_gr.v1.worker.cuda.", "vllm_gr.v1.worker.npu."))
-    or name == "torch_npu" or name.startswith("torch_npu.")
+    if name.startswith(("vllm_gr.platforms.cuda", "vllm_gr.ops.cuda", "vllm_gr.constraints.cuda_",
+                        "vllm_gr.v1.worker.cuda", "vllm_gr.v1.attention.backends.beam_attn_gpu",
+                        "vllm_gr.platforms.ascend", "vllm_gr.v1.worker.npu", "vllm_gr.ops.npu",
+                        "torch_npu", "vllm_ascend"))
 ]
 assert not unexpected, unexpected
 """

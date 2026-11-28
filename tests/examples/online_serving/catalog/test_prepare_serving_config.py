@@ -61,14 +61,14 @@ def test_prepare_serving_config_reuses_inputs_and_publishes_loadable_tables(
     triples.write_bytes(Path(current["path"]).with_name(triples.name).read_bytes())
     triples_input = triples.read_bytes()
     assert (
-        serving_config.main([*args, "--triples", str(triples), "--constraint-backend", "npu"]) == 0
+        serving_config.main([*args, "--triples", str(triples), "--constraint-backend", "cuda"]) == 0
     )
     assert read_settings(config)["attention-config"] == {"backend": "CUSTOM"}
     constraint = load_gr_config(config).constraint
     assert constraint is not None
     spec = constraint.table
     assert spec is not None and spec.path is not None
-    assert spec.backend.value == "npu"
+    assert spec.backend == "cuda"
     assert Path(spec.path).is_absolute()
     assert spec.artifact_digest and spec.artifact_digest == current["digests"]["artifact"]
     assert spec.tokenizer_digest and spec.tokenizer_digest == current["digests"]["tokenizer"]

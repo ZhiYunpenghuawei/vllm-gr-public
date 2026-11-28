@@ -124,7 +124,7 @@ class GPUDynamicBeam:
         width = output.options.num_return_sequences
         steps = output.layout.steps
         # Prefill-only sessions have no final select: filter/rank the complete
-        # candidate set before truncating, just as the merged NPU terminal path.
+        # candidate set before truncating.
         order = state.scores.argsort(dim=1, descending=True, stable=True)
         final_scores = state.scores.gather(1, order)
         history_order = order[:, :, None].expand_as(state.sequence)

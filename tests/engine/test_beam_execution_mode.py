@@ -35,38 +35,6 @@ def test_v1_requires_native_async() -> None:
         validate_gr_execution_config(config)
     config.scheduler_config.async_scheduling = True
     validate_gr_execution_config(config)
-    config.device_config = SimpleNamespace(device="npu")
-    validate_gr_execution_config(config)
-
-
-def test_v1_npu_startup_routes_to_acl_graph_capture(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from vllm_gr.v1.worker.npu import npu_model_runner_patch
-
-    capture = Mock(return_value=True)
-    monkeypatch.setattr(
-        npu_model_runner_patch,
-        "capture_beam_decode_graph",
-        capture,
-    )
-    GRConfig(
-        beam_max_width=4, beam_worker_decision=True, constraint=ConstraintConfig()
-    ).write_to_vllm_config(
-        worker_vllm_config := SimpleNamespace(
-            additional_config={}, scheduler_config=SimpleNamespace(async_scheduling=True)
-        )
-    )
-    worker = SimpleNamespace(
-        device="npu",
-        model_config=SimpleNamespace(enforce_eager=False),
-        vllm_config=worker_vllm_config,
-    )
-
-    from vllm_gr.v1.worker.npu.npu_beam_stage_runner import capture_ascend_forward
-
-    assert capture_ascend_forward(worker, False)
-    capture.assert_called_once_with(worker)
 
 
 def test_wrong_mode_rejected_before_core_preprocessing() -> None:
@@ -93,7 +61,7 @@ def test_wrong_mode_rejected_before_core_preprocessing() -> None:
         ("cuda", True, True, "inductor", None),
         ("cuda", False, False, "inductor", None),
         ("cuda", False, True, "eager", None),
-        ("npu", False, True, "inductor", None),
+        ("vendor", False, True, "inductor", None),
         ("cpu", False, True, "inductor", None),
     ],
 )

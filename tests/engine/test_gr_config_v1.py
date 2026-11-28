@@ -75,18 +75,6 @@ def test_canonical_mapping_round_trip_is_exact(tmp_path: Path) -> None:
     assert gr_config_from_mapping(gr_config_to_mapping(config)) == config
 
 
-def test_canonical_graph_batch_shape_round_trip(tmp_path: Path) -> None:
-    raw = _canonical_mapping(str(tmp_path / "table.safetensors"))
-    beam = raw["gr"]
-    assert isinstance(beam, dict)
-    beam["decode_graph_batch_size"] = 2
-
-    config = gr_config_from_mapping(raw)
-
-    assert config.beam_graph_batch_size == 2
-    assert gr_config_from_mapping(gr_config_to_mapping(config)) == config
-
-
 @pytest.mark.parametrize("sizes", [[1], [1, 3, 7], list(range(1, 9))])  # type: ignore[misc]
 def test_beam_batch_sizes_round_trip(sizes: list[int], tmp_path: Path) -> None:
     raw = _canonical_mapping(str(tmp_path / "table.safetensors"))
@@ -103,26 +91,6 @@ def test_beam_batch_sizes_round_trip(sizes: list[int], tmp_path: Path) -> None:
 
 def test_default_beam_batch_sizes() -> None:
     assert GRConfig().deployment.beam_batch_sizes == (1, 2, 4)
-
-
-def test_graph_widths_and_beam_batch_sizes_survive_transport(tmp_path: Path) -> None:
-    raw = _canonical_mapping(str(tmp_path / "table.safetensors"))
-    beam = raw["gr"]
-    assert isinstance(beam, dict)
-    beam["decode_graph_widths"] = [8, 16, 32]
-    raw["gr"].update({"beam_batch_sizes": [1, 3, 7]})
-    config = gr_config_from_mapping(raw)
-    assert gr_config_from_mapping(gr_config_to_mapping(config)) == config
-
-    host = SimpleNamespace(
-        additional_config={}, scheduler_config=SimpleNamespace(async_scheduling=True)
-    )
-    config.write_to_vllm_config(host)
-    restored = GRConfig.from_vllm_config(
-        SimpleNamespace(additional_config=json.loads(json.dumps(host.additional_config)))
-    )
-    assert restored.beam_graph_widths == (8, 16, 32)
-    assert restored.deployment.beam_batch_sizes == (1, 3, 7)
 
 
 @pytest.mark.parametrize("max_num_seqs", [1, 2, 3])  # type: ignore[misc]
@@ -337,37 +305,16 @@ def test_canonical_mapping_requires_explicit_max_top_k(tmp_path: Path) -> None:
         gr_config_from_mapping(raw)
 
 
-def test_constraint_max_top_k_has_no_npu_upper_bound(tmp_path: Path) -> None:
+def test_constraint_max_top_k_is_not_limited_by_device_kernel(tmp_path: Path) -> None:
     config = ConstraintTableSpec(
         enabled=True,
-        backend=ConstraintBackendKind.NPU,
+        backend="cuda",
         path=str(tmp_path / "table.safetensors"),
         artifact_digest=_ARTIFACT_DIGEST,
         tokenizer_digest=_TOKENIZER_DIGEST,
         max_top_k=257,
     )
     assert config.max_top_k == 257
-
-
-@pytest.mark.parametrize("batch_size", [1, 2, 4])  # type: ignore[misc]
-def test_engine_creation_preserves_flat_graph_batch_size(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, batch_size: int
-) -> None:
-    from vllm_gr.engine import arg_utils_gr
-
-    config = SimpleNamespace(
-        additional_config={}, scheduler_config=SimpleNamespace(async_scheduling=True)
-    )
-    args = engine_args_from_file(tmp_path, {"gr": {"decode_graph_batch_size": batch_size}})
-    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: config)
-    monkeypatch.setattr(
-        arg_utils_gr, "engine_config_service", lambda: platform_config_service(None)
-    )
-
-    if not hasattr(config, "scheduler_config"):
-        config.scheduler_config = SimpleNamespace(async_scheduling=True)
-    assert arg_utils_gr.create_engine_config(args) is config
-    assert GRConfig.from_vllm_config(config).beam_graph_batch_size == batch_size
 
 
 @pytest.mark.l1  # type: ignore[misc]
@@ -510,7 +457,7 @@ def test_canonical_input_paths_share_serialization_and_compile_hash(
     assert offline.compute_hash() == online.compute_hash()
 
 
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 def test_benchmark_server_command_uses_canonical_attention_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: str
 ) -> None:
@@ -849,28 +796,6 @@ def test_gr_dispatcher_separates_mode_and_json_configuration(
     args = EngineArgs.from_cli_args(captured[0])
     assert args.model == str(tmp_path)
     assert GRConfig.from_vllm_config(args).deployment.result_width == 2
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("worker_decision", [None, False, True])  # type: ignore[misc]
-def test_npu_sid_stage_vocab_resolves_auto_before_validation(
-    worker_decision: bool | None,
-) -> None:
-    from vllm_gr.config.parser import resolve_startup_config
-    from vllm_gr.engine import arg_utils_gr
-
-    defaults = arg_utils_gr._beam_worker_decision_default(
-        platform_config_service("npu"), beam_width_configured=True, worker_decision=None
-    )
-    settings = {"sid_stage_vocab": True}
-    if worker_decision is not None:
-        settings["worker_decision"] = worker_decision
-    if worker_decision is False:
-        with pytest.raises(ValueError, match="worker_decision"):
-            resolve_startup_config({}, settings, worker_decision_default=defaults)[0]
-    else:
-        config = resolve_startup_config({}, settings, worker_decision_default=defaults)[0]
-        assert config.beam_sid_stage_vocab and config.beam_worker_decision is True
 
 
 @pytest.mark.l1  # type: ignore[misc]

@@ -14,7 +14,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm_gr.config import ConstraintConfig, ConstraintMode
 from vllm_gr.config.models import DeploymentOptions
 from vllm_gr.ops.sliced_logits import compute_sliced_logits
-from vllm_gr.v1.worker.lm_head_cache import install_lm_head_cache_reload_hooks
+from vllm_gr.v1.worker.cuda.lm_head_cache import install_lm_head_cache_reload_hooks
 
 
 def _head(input_size: int, output_size: int, *, bias: bool = False, device: str = "cpu") -> Any:

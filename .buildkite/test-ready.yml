@@ -10,7 +10,7 @@ steps:
     command: >-
       pytest
       -n 4 --durations=10 -sv
-      -m '(l1) and (cpu_test and not gpu_test and not npu_test)' tests
+      -m '(l1) and (cpu_test and not gpu_test)' tests
 
   - label: "Kernels Test"
     key: l2-gpu-kernels

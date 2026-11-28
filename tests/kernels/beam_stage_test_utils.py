@@ -19,7 +19,6 @@ from vllm_gr.config.models import DEFAULT_DEPLOYMENT
 from vllm_gr.constraints.loader import _upload_cuda_backend
 from vllm_gr.constraints.versioned_table import VersionedConstraintTable
 from vllm_gr.v1.attention.backends.beam_attn import BeamAttentionImpl
-from vllm_gr.v1.beam.attention_context import BeamAttentionContext
 from vllm_gr.v1.beam.dispatch import (
     GR_STAGE_OUTPUT_ATTR,
     GRDeviceStateRef,
@@ -28,6 +27,9 @@ from vllm_gr.v1.beam.dispatch import (
 )
 from vllm_gr.v1.beam.execution_batch import BeamBatchExecutionView
 from vllm_gr.v1.beam.session import BeamSearchSession
+from vllm_gr.v1.worker.cuda.attention_context import (
+    CudaBeamAttentionContext as BeamAttentionContext,
+)
 from vllm_gr.v1.worker.cuda.beam_search_runner import (
     BeamBatchSearchRunner,
     BeamSearchRunner,

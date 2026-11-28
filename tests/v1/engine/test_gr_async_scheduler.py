@@ -21,6 +21,7 @@ from vllm.v1.engine import (
 )
 
 from tests.helpers.beam_requests import make_batch_request, make_multi_batch_request
+from tests.helpers.gr_config import admit_test_beam_limits
 from vllm_gr.v1.beam.batch_contracts import (
     BEAM_BATCH_PROTOCOL_VERSION,
     BeamBatchFailure,
@@ -654,6 +655,7 @@ def test_gr_submission_disables_native_stop_ownership() -> None:
         preprocess_add_request=preprocess,
         add_request=lambda processed: added.append(processed),
     )
+    admit_test_beam_limits(engine.vllm_config)
 
     _handle_submit_gr_session(engine, request)
 

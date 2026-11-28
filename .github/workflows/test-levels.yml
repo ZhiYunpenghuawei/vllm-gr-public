@@ -1,8 +1,6 @@
 name: Test levels
 
 on:
-  push:
-    branches: [main]
   schedule:
     # 02:00 Asia/Shanghai, daily; 03:00 Monday, weekly (UTC cron).
     - cron: '0 18 * * *'
@@ -29,20 +27,17 @@ concurrency:
 
 jobs:
   level:
-    # The shared pool has no GPU/NPU labels, so each lane reports and exits
-    # when the selected runner does not match its target device. Giving the
-    # runners device labels would allow precise routing instead.
+    # The shared pool has no GPU labels; report a non-CUDA runner as not run.
     name: level (${{ matrix.device }})
     strategy:
       fail-fast: false
       matrix:
-        # Buildkite runs the CUDA and CPU coverage for main-branch L3.
-        device: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.level == 'l2' || inputs.level == 'l3'))) && '["npu"]' || '["gpu", "npu"]') }}
+        device: ["gpu"]
     runs-on: self-hosted
     timeout-minutes: 360
     env:
       LANE_DEVICE: ${{ matrix.device }}
-      TEST_LEVEL: ${{ github.event_name == 'push' && 'l3' || github.event_name == 'schedule' && (github.event.schedule == '0 19 * * 0' && 'l5' || 'l4') || inputs.level || 'l3' }}
+      TEST_LEVEL: ${{ github.event_name == 'schedule' && (github.event.schedule == '0 19 * * 0' && 'l5' || 'l4') || inputs.level || 'l3' }}
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       VLLM_GR_RUN_MODEL_SMOKE: '1'
       VLLM_GR_ISOLATED_RUNNER: ${{ vars.VLLM_GR_ISOLATED_RUNNER || 'false' }}
@@ -53,13 +48,10 @@ jobs:
         run: |
           set -euo pipefail
           target="$LANE_DEVICE"
-          if command -v npu-smi >/dev/null 2>&1; then
-            detected=npu
-          elif command -v nvidia-smi >/dev/null 2>&1; then
+          if command -v nvidia-smi >/dev/null 2>&1; then
             detected=gpu
           else
-            echo 'No supported GPU or NPU was detected on this self-hosted runner.' >&2
-            exit 1
+            detected=unsupported
           fi
           if [[ "$detected" != "$target" ]]; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
@@ -77,9 +69,9 @@ jobs:
           echo "::notice::$cpu_message"
           echo "$cpu_message" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$TEST_LEVEL" == l2 ]]; then
-            message='L2 CUDA tests have moved to the Buildkite Ready pipeline.'
+            message='L2 CUDA tests also run in the Buildkite Ready pipeline.'
           elif [[ "$TEST_LEVEL" == l3 ]]; then
-            message='L3 CUDA tests have moved to the Buildkite Merge pipeline.'
+            message='L3 CUDA tests also run in the Buildkite Merge pipeline.'
           else
             exit 0
           fi
@@ -118,13 +110,7 @@ jobs:
         if: steps.accelerator.outputs.run == 'true' && steps.cache-venv.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          if [[ "$LANE_DEVICE" == npu ]]; then
-            # Reuse the vendor runtime (torch, torch_npu, custom ops) prepared
-            # in the runner image instead of installing a private copy.
-            uv venv --seed --system-site-packages .venv
-          else
-            uv venv --seed .venv
-          fi
+          uv venv --seed .venv
 
       - name: Activate virtual environment
         if: steps.accelerator.outputs.run == 'true'
@@ -157,16 +143,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$LANE_DEVICE" == npu ]]; then
-            python -c 'import torch, torch_npu, custom_ops_lib; assert torch.npu.is_available()'
-          else
-            python -c 'import torch; assert torch.cuda.is_available()'
-          fi
+          python -c 'import torch; assert torch.cuda.is_available()'
 
       - name: Run selected level
         if: steps.accelerator.outputs.run == 'true'
         env:
-          VLLM_GR_EXCLUDE_CPU_TESTS: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && '1' || '0' }}
+          VLLM_GR_EXCLUDE_CPU_TESTS: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: bash tools/ci/run_test_level.sh "$TEST_LEVEL"
 
       - name: Run L2 resource probe if isolated

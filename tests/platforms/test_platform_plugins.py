@@ -85,7 +85,7 @@ def probe():
     calls.append(("vendor", os.getpid()))
     if native.device_type == "cuda" and os.environ.get("GR_TEST_CUDA_REUSE") == "1":
         return "gr_plugin_fixture.cuda.VendorCudaPlatform"
-    if native.device_type in ("cuda", "npu", "vendor"):
+    if native.device_type in ("cuda", "other_vendor", "vendor"):
         return "gr_plugin_fixture.VendorPlatform"
     return None
 
@@ -141,7 +141,7 @@ def _run_platform_check(platform_wheel: Path, script: str, **env: str) -> None:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "enum,device", [("CUDA", "cuda"), ("OOT", "npu"), ("OOT", "vendor")]
+    "enum,device", [("CUDA", "cuda"), ("OOT", "other_vendor"), ("OOT", "vendor")]
 )
 def test_installed_plugin_wins_and_is_cached(platform_wheel: Path, enum: str, device: str) -> None:
     _run_platform_check(
@@ -154,6 +154,7 @@ def test_installed_plugin_wins_and_is_cached(platform_wheel: Path, enum: str, de
         import vllm.platforms
         from tests.helpers.native_platform import native_platform
         from vllm_gr.platforms.planning import integration_versions
+        from vllm_gr.plugin import install_gr_platform
         import gr_plugin_fixture as vendor
 
         vllm.platforms.current_platform = native_platform(os.environ["ENUM"], os.environ["DEVICE"])
@@ -171,6 +172,13 @@ def test_installed_plugin_wins_and_is_cached(platform_wheel: Path, enum: str, de
         assert versions["platform_distribution"] == "gr-test-vendor-platform"
         assert versions["platform_version"] == "1.2.3" and versions["platform_plugin"] == "vendor"
         assert versions["native_enum"] == os.environ["ENUM"]
+        # Installing the process seam must not invalidate the original
+        # native identity, resolve a second plugin or change plan metadata.
+        assert install_gr_platform(first) is True
+        assert table.current_gr_platform() is first
+        assert integration_versions(first).to_dict() == versions
+        assert vendor.instances == [os.getpid()]
+        assert sorted(vendor.calls) == [("alternate", os.getpid()), ("vendor", os.getpid())]
         """,
         ENUM=enum,
         DEVICE=device,
@@ -211,16 +219,25 @@ def test_forked_worker_resolves_its_own_platform(platform_wheel: Path) -> None:
         from types import SimpleNamespace
         import gr_plugin_fixture as vendor
         from vllm_gr.platforms import table
+        from vllm_gr.platforms.planning import integration_versions
+        from vllm_gr.plugin import install_gr_platform
         import vllm.platforms
         from tests.helpers.native_platform import native_platform
 
-        vllm.platforms.current_platform = native_platform("OOT", "vendor")
+        native = native_platform("OOT", "vendor")
+        vllm.platforms.current_platform = native
         parent_pid = os.getpid()
         parent_platform = table.current_gr_platform()
+        versions = integration_versions(parent_platform).to_dict()
+        assert install_gr_platform(parent_platform)
         child = os.fork()
         if child == 0:
+            assert vllm.platforms.current_platform is native
             local = table.current_gr_platform()
             assert type(local) is type(parent_platform) and local is not parent_platform
+            assert integration_versions(local).to_dict() == versions
+            assert install_gr_platform(local)
+            assert table.current_gr_platform() is local
             assert vendor.instances == [parent_pid, os.getpid()]
             assert ("vendor", os.getpid()) in vendor.calls
             os._exit(0)

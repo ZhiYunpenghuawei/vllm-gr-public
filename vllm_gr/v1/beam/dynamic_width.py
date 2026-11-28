@@ -11,7 +11,6 @@ width to a native in-place reorder with a different physical stride.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from copy import copy
 from typing import Any
 
 import torch
@@ -24,42 +23,6 @@ def _positive_int(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
-
-
-def initialize_packed_stage_pools(context: Any) -> None:
-    """Pack a newly created, idle context before any graph captures its pools.
-
-    The caller must never late-pack an existing context: graph capture can
-    retain addresses outside this helper's ownership. The capture marker is
-    an additional guard, rather than a way to discover arbitrary captures.
-    Per-layer native attention still receives contiguous ``[B,W,H,T,D]``
-    tensors, while dynamic reorder can process all K/V layers in one gather.
-    """
-
-    registry = getattr(context, "registry", None)
-    if registry is None:
-        raise ValueError("packed stage pools require a session registry")
-    if registry.num_active_sessions:
-        raise RuntimeError("cannot initialize packed pools while Beam sessions are active")
-    if getattr(context, "_npu_beam_graph_captured", False):
-        raise RuntimeError("cannot change KV pool addresses after Beam graph capture")
-    if getattr(context, "_npu_packed_width_pools", None) is not None:
-        return
-    if getattr(context, "_npu_beam_width_pools", None):
-        raise RuntimeError("packed initialization must precede stage width bank creation")
-    pools: list[BeamAttentionPool] = context.pools
-    if not pools:
-        raise ValueError("packed stage pools require at least one KV layer")
-    first = pools[0].unshared_key
-    packed = torch.empty((2, len(pools), *first.shape), dtype=first.dtype, device=first.device)
-    for layer, pool in enumerate(pools):
-        packed[0, layer].copy_(pool.unshared_key)
-        packed[1, layer].copy_(pool.unshared_value)
-    for layer, pool in enumerate(pools):
-        pool.unshared_key = packed[0, layer]
-        pool.unshared_value = packed[1, layer]
-    context._npu_packed_width_pools = {context.max_beams: packed}
-    context._npu_packed_reorder_staging = {}
 
 
 def get_stage_pools(context: Any, width: int) -> list[BeamAttentionPool]:
@@ -76,42 +39,23 @@ def get_stage_pools(context: Any, width: int) -> list[BeamAttentionPool]:
     pools: list[BeamAttentionPool] = context.pools
     if width == context.max_beams:
         return pools
-    banks: dict[int, list[BeamAttentionPool]] | None = getattr(
-        context, "_npu_beam_width_pools", None
-    )
+    banks: dict[int, list[BeamAttentionPool]] | None = getattr(context, "_beam_width_pools", None)
     if banks is None:
         banks = {}
-        context._npu_beam_width_pools = banks
+        context._beam_width_pools = banks
     if width not in banks:
-        packed_banks: dict[int, torch.Tensor] | None = getattr(
-            context, "_npu_packed_width_pools", None
-        )
-        if packed_banks is None:
-            banks[width] = [
-                BeamAttentionPool(
-                    max_batch=source.max_batch,
-                    max_beams=width,
-                    num_kv_heads=source.num_kv_heads,
-                    max_decode_steps=source.max_decode_steps,
-                    head_dim=source.head_dim,
-                    device=source.unshared_key.device,
-                    dtype=source.unshared_key.dtype,
-                )
-                for source in pools
-            ]
-        else:
-            base = packed_banks[context.max_beams]
-            shape = (*base.shape[:3], width, *base.shape[4:])
-            packed = torch.zeros(shape, dtype=base.dtype, device=base.device)
-            packed_banks[width] = packed
-            bank = []
-            for layer, source in enumerate(pools):
-                pool = copy(source)
-                pool.max_beams = width
-                pool.unshared_key = packed[0, layer]
-                pool.unshared_value = packed[1, layer]
-                bank.append(pool)
-            banks[width] = bank
+        banks[width] = [
+            BeamAttentionPool(
+                max_batch=source.max_batch,
+                max_beams=width,
+                num_kv_heads=source.num_kv_heads,
+                max_decode_steps=source.max_decode_steps,
+                head_dim=source.head_dim,
+                device=source.unshared_key.device,
+                dtype=source.unshared_key.dtype,
+            )
+            for source in pools
+        ]
     return banks[width]
 
 
@@ -136,18 +80,12 @@ def prune_stage_pools(context: Any, keep_widths: Iterable[int]) -> tuple[int, ..
     retained = {_positive_int("keep width", width) for width in keep_widths}
     if any(width > context.max_beams for width in retained):
         raise ValueError("retained Beam width exceeds the context capacity")
-    banks: dict[int, list[BeamAttentionPool]] | None = getattr(
-        context, "_npu_beam_width_pools", None
-    )
+    banks: dict[int, list[BeamAttentionPool]] | None = getattr(context, "_beam_width_pools", None)
     if not banks:
         return ()
     released = tuple(sorted(set(banks) - retained))
-    packed_banks: dict[int, torch.Tensor] = getattr(context, "_npu_packed_width_pools", {})
-    staging: dict[int, torch.Tensor] = getattr(context, "_npu_packed_reorder_staging", {})
     for width in released:
         del banks[width]
-        packed_banks.pop(width, None)
-        staging.pop(width, None)
     return released
 
 
@@ -164,8 +102,7 @@ def reorder_stage_kv(
     parents per request. ``history_steps`` is the number of already-written
     suffix positions. ``gather`` produces separate staging storage before
     ``copy_``, including when both widths use the same pool and parents fan out.
-    Packed banks copy the full time capacity, whose future positions are
-    overwritten before use; legacy pools copy only valid history positions.
+    Only valid history positions are copied.
     Inactive requests are always left untouched.
     """
 
@@ -185,30 +122,6 @@ def reorder_stage_kv(
         raise ValueError("KV pool banks must contain the same nonzero layer count")
     if parents.device != source[0].unshared_key.device:
         raise ValueError("KV parents and pools must share a device")
-    packed_banks: dict[int, torch.Tensor] | None = getattr(context, "_npu_packed_width_pools", None)
-    if packed_banks is not None:
-        source_packed = packed_banks[source_width]
-        target_packed = packed_banks[target_width]
-        offsets = torch.arange(batch, dtype=torch.int64, device=parents.device)[:, None]
-        global_parents = (parents.to(torch.int64) + offsets * source_width).reshape(-1)
-        flattened = source_packed.flatten(2, 3)
-        if batch < context.max_batch:
-            # A leading active-B slice has gaps between layers; use one
-            # compact gather followed by one strided active-slice copy.
-            selected = flattened.index_select(2, global_parents)
-            target_packed[:, :, :batch].copy_(
-                selected.view(2, len(source), batch, target_width, *source_packed.shape[4:])
-            )
-        elif source_width != target_width:
-            torch.index_select(flattened, 2, global_parents, out=target_packed.flatten(2, 3))
-        else:
-            staging: dict[int, torch.Tensor] = context._npu_packed_reorder_staging
-            if target_width not in staging:
-                staging[target_width] = torch.empty_like(target_packed)
-            scratch = staging[target_width]
-            torch.index_select(flattened, 2, global_parents, out=scratch.flatten(2, 3))
-            target_packed.copy_(scratch)
-        return
     indices = parents.to(torch.int64)[:, :, None, None, None]
     for old_pool, new_pool in zip(source, target):
         for name in ("unshared_key", "unshared_value"):
@@ -219,7 +132,7 @@ def reorder_stage_kv(
 
 
 class DynamicBeamState:
-    """Own device-resident histories for one NPU stage-width schedule.
+    """Own device-resident histories for one Beam stage-width schedule.
 
     The context owns KV bank storage and session lifecycle. This state owns
     compact candidate histories only; it never advances registry counters.
@@ -357,8 +270,7 @@ class DynamicBeamState:
         )
         parents = torch.div(flat_indices, candidate_width, rounding_mode="floor")
         if not is_last:
-            # Parent IDs are at most 255, exactly representable in float32.
-            # Ascend integer argsort falls back to AiCPU; use its AiCore path.
+            # Parent IDs fit exactly in FP32, preserving stable grouping.
             order = parents.to(torch.float32).argsort(dim=1, stable=True)
             parents = parents.gather(1, order)
             flat_indices = flat_indices.gather(1, order)
@@ -401,7 +313,6 @@ class DynamicBeamState:
 __all__ = [
     "DynamicBeamState",
     "get_stage_pools",
-    "initialize_packed_stage_pools",
     "prune_stage_pools",
     "reorder_stage_kv",
 ]

@@ -256,33 +256,25 @@ def test_python_gr_requires_a_mapping(overrides: Any) -> None:
         load_gr_config(overrides=overrides)
 
 
-@pytest.mark.parametrize("mode", ["table", "none"])  # type: ignore[misc]
-@pytest.mark.parametrize("execution", [None, "cascade", "xllm"])  # type: ignore[misc]
-def test_python_decode_execution_survives_worker_transport(
-    mode: str, execution: str | None
-) -> None:
-    from dataclasses import replace
-
-    raw = (
-        _v2_table()
-        if mode == "table"
-        else {"gr": {"constraint_mode": "none", "constraint_table": None}}
-    )
-    config = replace(gr_config_from_mapping(raw), npu_decode_execution=execution)
-    worker = gr_config_from_mapping(gr_config_to_mapping(config))
-    assert worker.npu_decode_execution == config.npu_decode_execution
-
-
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda", "platform"])  # type: ignore[misc]
 def test_auto_backend_remains_unbound_until_driver_selects_device(device: str) -> None:
-    from vllm_gr.config.models import resolve_constraint_backend
+    from vllm_gr.config.models import (
+        constraint_backend_name,
+        resolve_constraint_backend,
+    )
 
     config = gr_config_from_mapping(_v2_table())
-    assert config.constraint.table.enabled and config.constraint.table.backend.value == "auto"
+    assert (
+        config.constraint.table.enabled
+        and constraint_backend_name(config.constraint.table.backend) == "auto"
+    )
     worker = gr_config_from_mapping(
         gr_config_to_mapping(resolve_constraint_backend(config, device))
     )
-    assert worker.constraint.table.enabled and worker.constraint.table.backend.value == device
+    assert (
+        worker.constraint.table.enabled
+        and constraint_backend_name(worker.constraint.table.backend) == device
+    )
 
 
 def test_v1_candidate_width_cannot_be_silently_ignored() -> None:

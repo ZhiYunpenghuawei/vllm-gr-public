@@ -16,9 +16,9 @@ INSTRUMENTATION = Path(__file__).resolve().parents[2] / "tools" / "AB_Tests" / "
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "missing_dependency", [False, True], ids=["legacy-parent-absent", "dependency-absent"]
+    "legacy_ascend_present", [False, True], ids=["legacy-parent-absent", "legacy-ascend-present"]
 )
-def test_beam_worker_decision_probe(tmp_path: Path, missing_dependency: bool) -> None:
+def test_beam_worker_decision_probe(tmp_path: Path, legacy_ascend_present: bool) -> None:
     checkout = tmp_path / "checkout"
     files = {
         "vllm/__init__.py": "",
@@ -30,11 +30,11 @@ def test_beam_worker_decision_probe(tmp_path: Path, missing_dependency: bool) ->
             "def run_beam_decision_candidates():\n    return 'legacy'\n"
         ),
     }
-    if missing_dependency:
+    if legacy_ascend_present:
         files.update(
             {
                 "vllm_gr/v1/worker/npu/__init__.py": "",
-                "vllm_gr/v1/worker/npu/beam_decision.py": "import missing_timing_probe_dependency\n",
+                "vllm_gr/v1/worker/npu/beam_decision.py": "raise AssertionError('old backend must not import')\n",
             }
         )
     for name, source in files.items():
@@ -67,8 +67,5 @@ def test_beam_worker_decision_probe(tmp_path: Path, missing_dependency: bool) ->
     )
     assert not completed.stderr
     receipt = output / f"cpu-timing-{int(completed.stdout)}.json"
-    if missing_dependency:
-        assert not receipt.exists()
-    else:
-        timing = json.loads(receipt.read_text(encoding="utf-8"))
-        assert timing["metrics"]["beam_worker_decision"]["count"] == 1
+    timing = json.loads(receipt.read_text(encoding="utf-8"))
+    assert timing["metrics"]["beam_worker_decision"]["count"] == 1

@@ -74,9 +74,13 @@ _WORKER_V2_PROFILE_PATCH_MARKER = "_vllm_gr_beam_profile_v2_patch"
 
 
 def _warmup_constraint_backend(runner: Any, backend: Any) -> None:
-    from vllm_gr.config import ConstraintBackendKind
+    from vllm_gr.config import constraint_backend_name
+    from vllm_gr.v1.worker.cuda.constraint_projection import (
+        prepare_cuda_constraint_projection,
+    )
 
-    if backend.info.backend is ConstraintBackendKind.CUDA:
+    if constraint_backend_name(backend.info.backend) == "cuda":
+        prepare_cuda_constraint_projection(runner, backend)
         backend.warmup_stage_topk(runner.model_config.dtype)
         head_dtype = getattr(runner.model_config, "head_dtype", None)
         if head_dtype is not None and head_dtype != runner.model_config.dtype:
@@ -84,7 +88,7 @@ def _warmup_constraint_backend(runner: Any, backend: Any) -> None:
 
 
 def discover_worker_runners() -> tuple[tuple[str, type[Any]], ...]:
-    """Discover the upstream V2 GPU ModelRunner without importing NPU runtime."""
+    """Discover the upstream V2 GPU ModelRunner lazily."""
     try:
         from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     except ImportError as exc:
@@ -358,6 +362,7 @@ def _apply_v2_runner_patches() -> None:
     Backend load wrapper last, so the final ``load_model`` carries the
     constraint marker that the V2 validation gate checks.
     """
+    from vllm_gr.v1.worker.cuda.constraint_projection import prepare_cuda_model
     from vllm_gr.v1.worker.cuda.gpu_beam_stage_runner import make_cuda_stage_binding
     from vllm_gr.v1.worker.cuda.v2.gpu_beam_stage_runner_v2 import CudaStageHooksV2
     from vllm_gr.v1.worker.runner_binding import bind_after_model_load
@@ -385,6 +390,7 @@ def _apply_v2_runner_patches() -> None:
             runner_class.load_model = make_load_model_with_constraint_backend(
                 load_model,
                 max_batch=max(SUPPORTED_BEAM_BATCH_SIZES),
+                prepare_model=prepare_cuda_model,
                 prepare_backend=_warmup_constraint_backend,
             )
 
@@ -428,8 +434,12 @@ def _apply_v2_runner_patches() -> None:
 def install() -> None:
     """Install shared CUDA Worker utilities before patching the V2 runner."""
     from vllm_gr.v1.worker.cuda.runner_installer import install_worker_hooks
+    from vllm_gr.v1.worker.cuda.sliced_logits_patch import (
+        apply_cuda_v2_sliced_logits_patch,
+    )
 
     install_worker_hooks()
+    apply_cuda_v2_sliced_logits_patch()
     _apply_v2_runner_patches()
 
 

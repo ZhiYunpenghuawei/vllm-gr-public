@@ -1,32 +1,19 @@
 # vllm check-env
 
 `vllm check-env --gr` checks the installed vLLM version and reports the
-selected platform. On Ascend it also checks the vendor runtime packages.
+selected platform. An independent GR platform plugin can supply its own check.
 
 ## Usage
 
 ```bash
 vllm check-env --gr          # Validate the selected platform
-vllm check-env --gr --npu    # Require the Ascend NPU platform
 ```
 
 ## What it checks
 
 The command runs the environment check supplied by the selected GR platform.
-`--npu` additionally requires an Ascend native platform, including when an
-installed GR plugin handles it. The built-in CUDA and Ascend implementations
-support vLLM 0.30.0. The built-in Ascend class checks the following runtime.
-
-| Item | Required |
-| --- | --- |
-| `vllm` | 0.30.0 |
-| `vllm-ascend` | 0.30.0rc2 |
-| `triton-ascend` | 3.6.0 |
-| `triton` module | Provides `triton._C.libtriton.ascend` |
-
-The Triton check imports the module that Python actually resolves. Installing
-the `triton-ascend` distribution is not sufficient on its own: a standard
-`triton` wheel installs the same top-level package and can overwrite it.
+The built-in CUDA implementation requires vLLM 0.30.0. A native platform
+without a compatible GR plugin is not supported.
 
 ## Output and exit status
 
@@ -39,9 +26,8 @@ vLLM-GR environment check passed
   platform: cuda
 ```
 
-A version mismatch or a missing or broken Ascend runtime raises an error with
-the found and required versions, and the command exits non-zero. `--npu` on a
-host whose auto-detection selects another device fails the platform check.
+A version mismatch, unsupported native platform or failed platform check raises
+an error and the command exits non-zero.
 
 ## Scope
 

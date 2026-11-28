@@ -24,8 +24,8 @@ def prepare_serving_config(
     """Return the published YAML and the table it references."""
     if raw_catalog is not None and triples is not None:
         raise ValueError("Choose either --raw-catalog or --triples")
-    if backend not in {"cuda", "npu"}:
-        raise ValueError("Constraint backend must be cuda or npu")
+    if backend != "cuda":
+        raise ValueError("Constraint backend must be cuda")
     model = model.expanduser().resolve()
     if not model.is_dir():
         raise ValueError(f"Expected a local model directory: {model}")
@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True, help="Local OneRec model directory")
     parser.add_argument("--workdir", type=Path, required=True, help="Output directory")
-    parser.add_argument("--constraint-backend", choices=("cuda", "npu"), default="cuda")
+    parser.add_argument("--constraint-backend", choices=("cuda",), default="cuda")
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument(
         "--raw-catalog",

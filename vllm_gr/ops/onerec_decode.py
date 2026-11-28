@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""OneRec decode post-processing operators.
-
-The public functions mirror the xllm-ops NPU signatures.  The ordinary
-PyTorch implementations provide the GPU fallback while preserving the NPU
-operator signatures.
-"""
+"""Portable OneRec decode post-processing operators and dispatcher schemas."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 
@@ -97,8 +93,8 @@ def _parent_beams_from_prefix(
     request_offset = (
         torch.arange(batch_size, device=prefix.device, dtype=prefix.dtype)[:, None] * beam_size
     )
-    # beam_search_group emits global prefix values, while the standalone NPU
-    # select test uses request-local values.  Accept both representations.
+    # beam_search_group emits global prefix values; standalone selection may
+    # use request-local values. Accept both representations.
     prefix = torch.where(prefix[:, -1:] > beam_size, prefix - request_offset, prefix)
     counts = torch.cat((prefix[:, :1], prefix[:, 1:] - prefix[:, :-1]), dim=1)
     parents = torch.arange(beam_size, dtype=torch.int64, device=group_token_num.device).expand(
@@ -121,11 +117,11 @@ def _select_unshared_kv_torch(
     beam_size: int,
     layer_num: int,
 ) -> None:
-    """NPU-semantic in-place KV selection using ordinary PyTorch ops.
+    """In-place KV selection using ordinary PyTorch ops.
 
-    xllm-ops derives the mapping from ``group_token_num`` and copies the full
+    Selection derives the mapping from ``group_token_num`` and copies the full
     cache time axis.  ``beam_index`` and ``decode_step`` are retained because
-    they are part of the public NPU ABI.
+    they are part of the existing public operator ABI.
     """
 
     batch_size, _, _, _ = _validate_select_unshared_kv(
@@ -160,7 +156,7 @@ def select_unshared_kv(
     beam_size: int,
     layer_num: int,
 ) -> None:
-    """Update K/V tensor lists in place; signature matches xllm-ops."""
+    """Update K/V tensor lists in place."""
 
     return _select_unshared_kv_torch(
         beam_index,
@@ -270,17 +266,11 @@ def beam_search_rec_final_select(
     current_step: int,
     result_width: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if log_probs.device.type == "cuda":
-        return _beam_search_rec_final_select_cuda_dispatch(
-            log_probs,
-            top_tokens,
-            top_probs,
-            sequence,
-            current_step,
-            result_width,
-        )
-    return _beam_search_rec_final_select_torch(
-        log_probs, top_tokens, top_probs, sequence, current_step, result_width
+    return cast(
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        torch.ops.vllm_gr.beam_search_rec_final_select(
+            log_probs, top_tokens, top_probs, sequence, current_step, result_width
+        ),
     )
 
 
@@ -354,12 +344,24 @@ def _beam_search_group_torch(
     )
 
     if current_step == 0:
-        # Matches the NPU kernel's legacy initialization contract (verified on
-        # device): only the flat sequence rows [0, batch_size) receive their
-        # own row's first candidate token; every other output stays zero.
-        # The Asynchronous scheduling integration bypasses this path through init_from_prefill.
-        flat_out_sequence = out_sequence.reshape(-1, total_rounds)
-        flat_out_sequence[:batch_size, 0] = top_tokens[:batch_size, 0].to(torch.int32)
+        # Prefill starts with one logical parent per request. Select its
+        # candidates in the same stable score order as later Beam steps.
+        effective_k = min(top_k, candidate_width)
+        initial_tokens = top_tokens.reshape(batch_size, beam_width, candidate_width)[:, 0]
+        initial_scores = (
+            log_probs.reshape(batch_size, beam_width, 1)[:, 0]
+            + top_probs.reshape(batch_size, beam_width, candidate_width)[:, 0]
+        )
+        selected = _stable_topk_indices(initial_scores, effective_k)
+        tokens = torch.gather(initial_tokens, 1, selected)
+        request_base = (
+            torch.arange(batch_size, device=device, dtype=torch.int32)[:, None] * beam_width
+        )
+        out_token_ids[:, :effective_k] = tokens
+        out_token_index[:, :effective_k] = request_base
+        out_log_probs[:, :effective_k] = torch.gather(initial_scores, 1, selected)
+        out_prefix.copy_((request_base + effective_k).expand_as(out_prefix))
+        out_sequence[:, :effective_k, 0] = tokens
         return (
             out_token_ids,
             out_token_index,
@@ -433,110 +435,24 @@ def beam_search_group(
     - ``top_k`` is the *survivor* count -- how many winners are kept per
       request.
 
-    ``K != W`` is fully supported by both backends: each derives ``K`` from the
-    tensors.  ``top_k != W`` is **not**: the CUDA backend fuses the survivor
-    count into its ``W``-wide parent grouping (``out_parent_count_prefix`` is
-    one entry per beam row), so it can only emit exactly ``W`` survivors.  That
-    limitation is raised explicitly rather than silently ignored; narrowing the
-    width between stages is expressed through ``dynamic_beam_widths`` and
-    ``beam_state.select``, not through this operator.
-
-    The torch reference does honour ``top_k < W``, but its outputs then mix
-    widths (tokens/parents/scores/sequence are ``top_k`` wide while the
-    per-parent prefix stays ``W`` wide, matching the NPU contract).
+    Implementations may impose additional geometry limits. The portable
+    reference supports narrowing survivors while keeping a per-parent prefix
+    of width W.
     """
-    if log_probs.device.type == "cuda":
-        return _beam_search_group_cuda_dispatch(
-            log_probs,
-            top_tokens,
-            top_probs,
-            sequence,
-            current_step,
-            top_k,
-        )
-    return _beam_search_group_torch(log_probs, top_tokens, top_probs, sequence, current_step, top_k)
-
-
-def _beam_search_rec_final_select_cuda_dispatch(
-    log_probs: torch.Tensor,
-    top_tokens: torch.Tensor,
-    top_probs: torch.Tensor,
-    sequence: torch.Tensor,
-    current_step: int,
-    result_width: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    from vllm_gr.ops.cuda.beam_selection import beam_search_rec_final_select_cuda
-
-    return beam_search_rec_final_select_cuda(
-        log_probs,
-        top_tokens,
-        top_probs,
-        sequence,
-        current_step,
-        result_width,
+    if isinstance(top_k, bool) or not isinstance(top_k, int):
+        raise TypeError("top_k must be an int")
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    return cast(
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        torch.ops.vllm_gr.beam_search_group(
+            log_probs, top_tokens, top_probs, sequence, current_step, top_k
+        ),
     )
 
 
 class UnsupportedSurvivorCountError(NotImplementedError, ValueError):
-    """``top_k != beam_width`` on the fixed-width CUDA group operator.
-
-    It is a ``NotImplementedError`` because a narrower selection is a missing
-    capability, not a bad value.  It is also a ``ValueError`` because that is
-    what this case raised before the CUDA dispatch checked it itself, so a
-    caller written against the old exception still catches it.
-    """
-
-
-def _beam_search_group_cuda_dispatch(
-    log_probs: torch.Tensor,
-    top_tokens: torch.Tensor,
-    top_probs: torch.Tensor,
-    sequence: torch.Tensor,
-    current_step: int,
-    top_k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    from vllm_gr.ops.cuda.beam_selection import (
-        _validate_beam_inputs,
-        beam_search_group_cuda,
-    )
-
-    # The CUDA group operator is fixed-width: it always emits exactly one
-    # survivor per beam row (``W``), and its ``candidate_width`` argument
-    # selects the column extent ``K``, which it reads from the tensors.  So
-    # ``K`` needs no plumbing here, but ``top_k`` -- the survivor count, the
-    # torch convention -- cannot be honoured.  Raise instead of dropping it:
-    # a silent ``del`` would make a narrower selection look supported while
-    # returning ``W`` winners.
-    #
-    # Validate in the order the callee did before K was read from the tensors:
-    # tensors and current_step first (the same validator, so malformed inputs
-    # get its ValueError/TypeError rather than an IndexError from ``shape[1]``),
-    # then the type of top_k (``8.0 != 8`` is False, so the width comparison
-    # alone would accept a float), then the width itself.
-    _, beam_width, candidate_width, _ = _validate_beam_inputs(
-        log_probs, top_tokens, top_probs, sequence, current_step, None
-    )
-    if current_step not in (0, 1, 2):
-        raise ValueError("CUDA BeamSearchGroup supports current_step 0, 1, or 2")
-    if isinstance(top_k, bool) or not isinstance(top_k, int):
-        raise TypeError("top_k must be an int")
-    # A non-positive survivor count is invalid rather than merely unsupported.
-    if top_k <= 0:
-        raise ValueError("top_k must be positive")
-    if top_k != beam_width:
-        raise UnsupportedSurvivorCountError(
-            "CUDA beam_search_group always emits beam_width survivors; "
-            f"got top_k={top_k}, beam_width={beam_width}. Narrow the width "
-            "through dynamic_beam_widths/beam_state.select instead."
-        )
-    return beam_search_group_cuda(
-        log_probs,
-        top_tokens,
-        top_probs,
-        sequence,
-        current_step,
-        candidate_width,
-    )
+    """The selected implementation cannot emit the requested survivor count."""
 
 
 def _beam_search_rec_final_select_meta(
@@ -603,12 +519,6 @@ _OP_LIBRARY.impl(
     "CompositeExplicitAutograd",
 )
 _OP_LIBRARY.impl("beam_search_group", _beam_search_group_torch, "CompositeExplicitAutograd")
-_OP_LIBRARY.impl(
-    "beam_search_rec_final_select",
-    _beam_search_rec_final_select_cuda_dispatch,
-    "CUDA",
-)
-_OP_LIBRARY.impl("beam_search_group", _beam_search_group_cuda_dispatch, "CUDA")
 _OP_LIBRARY.impl(
     "beam_search_rec_final_select",
     _beam_search_rec_final_select_meta,

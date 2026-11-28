@@ -6,8 +6,7 @@
 The operator consumes raw logits and the compact three-level constraint-table
 representation used by OneRec.  It returns the top-k valid token ids and their
 log probabilities for every input row.  This implementation intentionally uses
-ordinary PyTorch operators so it can serve as a portable fallback when the NPU
-ACLNN fused operator is unavailable.
+ordinary PyTorch operators so it can serve as a portable reference.
 """
 
 from __future__ import annotations
@@ -35,36 +34,6 @@ def _range_candidates(
     return candidates, valid
 
 
-def _candidate_set_logprobs(
-    candidate_logits: torch.Tensor,
-    top_indices: torch.Tensor,
-    top_valid: torch.Tensor,
-    temperatures: torch.Tensor,
-) -> torch.Tensor:
-    """Score selected tokens over the legal candidate set (NPU fallback domain).
-
-    The fused NPU operator normalizes over the legal candidate set, so the
-    Torch fallback must keep that domain to stay interchangeable with it.
-    The effective temperature is applied before ``logsumexp`` so the returned
-    logprobs match the fused operator for any temperature; the pre-PR path
-    scaled the candidate-set logits before normalizing as well.
-    """
-    scaled = candidate_logits
-    if temperatures.numel() > 0:
-        temps = temperatures.float().to(candidate_logits.device).reshape(-1)
-        if temps.numel() == 1:
-            temps = temps.expand(candidate_logits.size(0))
-        divisors = torch.where(temps == 0, torch.ones_like(temps), temps)
-        scaled = candidate_logits / divisors[:, None]
-    top_scores = scaled.gather(1, top_indices)
-    log_denominator = torch.logsumexp(scaled, dim=1, keepdim=True)
-    return torch.where(
-        top_valid,
-        top_scores - log_denominator,
-        torch.full_like(top_scores, _INVALID_LOGIT),
-    )
-
-
 def _finish_topk(
     logits: torch.Tensor,
     candidate_tokens: torch.Tensor,
@@ -74,38 +43,18 @@ def _finish_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     candidate_logits = logits.gather(1, candidate_tokens.to(torch.long)).float()
     candidate_logits = candidate_logits.masked_fill(~valid_candidates, float("-inf"))
-    if candidate_logits.device.type == "npu":
-        # Preserve the established NPU fallback path; the fused NPU operator
-        # does not promise CUDA's strengthened exact-tie ordering.
-        _, top_indices = candidate_logits.topk(top_k, dim=1, largest=True, sorted=True)
-    else:
-        # Stable descending order freezes the lower constraint-table offset as
-        # the exact-tie winner and serves as the deterministic CUDA oracle.
-        # NaN candidates must sort last (mirroring the fused CUDA kernel), not
-        # first, so finite candidates win selection on poisoned logits.
-        safe_logits = torch.nan_to_num(candidate_logits, nan=float("-inf"))
-        top_indices = torch.argsort(safe_logits, dim=1, descending=True, stable=True)[:, :top_k]
+    # Stable descending order freezes the lower table offset as the tie winner.
+    safe_logits = torch.nan_to_num(candidate_logits, nan=float("-inf"))
+    top_indices = torch.argsort(safe_logits, dim=1, descending=True, stable=True)[:, :top_k]
     top_valid = valid_candidates.gather(1, top_indices)
     top_tokens = candidate_tokens.gather(1, top_indices).to(torch.int64)
-    if candidate_logits.device.type == "npu":
-        # The fused NPU operator normalizes over the legal candidate set;
-        # the Torch fallback must keep that domain so it stays interchangeable
-        # with the fused operator.  Only the CPU and CUDA paths adopt the
-        # shared full-window scoring contract.
-        top_logprobs = _candidate_set_logprobs(
-            candidate_logits,
-            top_indices,
-            top_valid,
-            temperatures,
-        )
-    else:
-        top_logprobs = score_selected_tokens(
-            logits,
-            top_tokens,
-            top_valid,
-            temperatures,
-            invalid_logprob=_INVALID_LOGIT,
-        )
+    top_logprobs = score_selected_tokens(
+        logits,
+        top_tokens,
+        top_valid,
+        temperatures,
+        invalid_logprob=_INVALID_LOGIT,
+    )
     return top_tokens, top_logprobs
 
 
@@ -261,47 +210,8 @@ def rec_constrained_topk(
     max_prefix2_degree: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dispatch constrained top-k to a device implementation or Torch fallback."""
-    if logits.device.type == "cuda":
-        from vllm_gr.ops.cuda.rec_constrained_topk import rec_constrained_topk_cuda
-
-        tokens, logprobs, _, _ = rec_constrained_topk_cuda(
-            logits,
-            sequence_group,
-            first_token_ids,
-            prefix1_offsets,
-            prefix1_values,
-            prefix1_pair_keys,
-            prefix2_value_offsets,
-            prefix2_values,
-            temperatures,
-            current_step,
-            top_k,
-            max_prefix1_degree,
-            max_prefix2_degree,
-        )
-        return tokens, logprobs
-    if logits.device.type == "npu":
-        from vllm_gr.ops.npu import (
-            rec_constrained_topk_npu,
-            rec_constrained_topk_npu_available,
-        )
-
-        if rec_constrained_topk_npu_available():
-            return rec_constrained_topk_npu(
-                logits,
-                sequence_group,
-                first_token_ids,
-                prefix1_offsets,
-                prefix1_values,
-                prefix1_pair_keys,
-                prefix2_value_offsets,
-                prefix2_values,
-                temperatures,
-                current_step,
-                top_k,
-                max_prefix1_degree,
-                max_prefix2_degree,
-            )
+    # This is the portable reference; platform executors call their optimized
+    # operators directly rather than selecting a concrete backend here.
     return rec_constrained_topk_torch(
         logits,
         sequence_group,

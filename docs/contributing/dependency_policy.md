@@ -7,7 +7,7 @@ Use the dependency files for the target runtime when updating supported versions
 | Dependency | Where to declare it |
 | --- | --- |
 | Required on every target | [Shared runtime requirements](../../requirements/common.txt) |
-| Specific to a target or its vendor runtime | The corresponding file in [requirements/](../../requirements/) |
+| Specific to a built-in target | The corresponding file in [requirements/](../../requirements/) |
 | Needed to build the package | `[build-system].requires` in [pyproject.toml](../../pyproject.toml) |
 | Needed for development or an optional feature | The corresponding extra in `[project.optional-dependencies]` in [pyproject.toml](../../pyproject.toml) |
 
@@ -15,6 +15,9 @@ Explain non-obvious pins or bounds next to the requirement. When changing a
 constraint, verify installation and exercise the affected code on each platform
 that uses it. The [installation guides](../getting_started/installation/README.md)
 describe which dependencies the platform environment supplies.
+
+Independently distributed platforms own their device runtime dependencies.
+The core has no Ascend runtime or operator dependencies.
 
 ## Runtime compatibility and package versions
 
@@ -41,7 +44,7 @@ python -m pytest --confcutdir=tests/packaging -q tests/packaging/test_install_me
 ### Wheel smoke test
 
 Check the built wheel's dependency metadata and import it outside the
-checkout using the target you changed (`cpu`, `cuda` or `npu`).
+checkout using the target you changed (`cpu` or `cuda`).
 
 !!! warning "Build artifacts"
 

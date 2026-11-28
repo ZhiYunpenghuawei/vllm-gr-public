@@ -16,11 +16,9 @@ class CheckEnvSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        from vllm_gr.platforms.table import ascend_platform_plugin, current_gr_platform
+        from vllm_gr.platforms.table import current_gr_platform
 
         integration = current_gr_platform()
-        if args.npu and ascend_platform_plugin() is None:
-            raise RuntimeError("--npu requires the native Ascend platform")
         report = integration.check_environment()
 
         print("vLLM-GR environment check passed")
@@ -34,16 +32,8 @@ class CheckEnvSubcommand(CLISubcommand):
         parser = subparsers.add_parser(
             self.name,
             help="Validate vLLM-GR runtime dependencies.",
-            description=(
-                "Validate vLLM/vLLM-Ascend versions, the selected platform, "
-                "and the active Triton-Ascend backend."
-            ),
-            usage="%(prog)s --gr [--npu]",
-        )
-        parser.add_argument(
-            "--npu",
-            action="store_true",
-            help="Require the Ascend NPU platform even when auto-detection selects another device.",
+            description="Validate runtime compatibility for the selected GR platform.",
+            usage="%(prog)s --gr",
         )
         return parser
 

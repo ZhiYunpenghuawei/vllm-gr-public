@@ -3,7 +3,7 @@
 """CUDA ModelRunner contract used by the persistent GR stage core.
 
 Implementations are peers, selected by the installed runner entrypoint. This
-module has no runtime CUDA imports and is safe for shared CUDA/NPU dispatchers
+module has no runtime CUDA imports and is safe for shared dispatchers
 to reference.
 
 The runtime abstract base class rejects missing operations and policies at
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 
 class CudaStageHooks(ABC):
-    """Native CUDA operations; this contract does not define an NPU adapter.
+    """Native CUDA operations; other platforms own their own adapters.
 
     The core owns stage/session lifetime and dispatch ordering. Hooks own the
     runner-specific native operations below. A Worker retains one concrete

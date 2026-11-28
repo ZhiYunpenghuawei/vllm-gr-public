@@ -216,40 +216,6 @@ def test_is_prefill_graph_enabled() -> None:
     assert not is_prefill_graph_enabled(MockModelRunner(prefill_graph_enabled=False))
 
 
-def test_npu_gates_allow_prefill_graph(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(prefill_graph_common, "is_npu_platform", lambda: True)
-    from vllm_gr.v1.worker.prefill_graph_runner import (
-        is_prefill_graph_enabled,
-        is_prefill_phase_batch,
-    )
-
-    assert is_prefill_graph_enabled(MockModelRunner())
-    assert not is_prefill_graph_enabled(MockModelRunner(prefill_graph_enabled=False))
-
-    # Prefill-phase batches classify as prefill-phase on NPU.
-    import numpy as np
-
-    input_batch = SimpleNamespace(
-        num_computed_tokens_cpu=np.array([0]),
-        num_prompt_tokens=np.array([128]),
-        req_id_to_index={"r1": 0},
-    )
-    runner = SimpleNamespace(input_batch=input_batch)
-    output_std = SimpleNamespace(
-        scheduled_new_reqs=[SimpleNamespace(req_id="r1")],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
-        beam_data={},
-        scheduled_spec_decode_tokens={},
-        scheduled_encoder_inputs={},
-        num_scheduled_tokens={"r1": 1},
-    )
-    assert is_prefill_phase_batch(runner, output_std) is True
-
-
 def test_multi_req_graph_buffers() -> None:
     runner = MockModelRunner()
     graph_runner = BeamPrefillGraphRunner(runner, buckets=[1024])
@@ -271,21 +237,15 @@ def test_multi_req_graph_buffers() -> None:
 
 
 def test_platform_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tests.helpers.ascend_platform import AscendGRPlatform
     from tests.helpers.cuda_platform import CudaGRPlatform
     from tests.platforms.fake_accel import FakeGRPlatform
     from vllm_gr.v1.worker import prefill_graph_runner as dispatcher
     from vllm_gr.v1.worker.cuda.v1.gpu_prefill_graph_runner import GPUPrefillGraphRunner
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
 
     runner = MockModelRunner()
-    for platform_cls, runner_cls in (
-        (AscendGRPlatform, NPUPrefillGraphRunner),
-        (CudaGRPlatform, GPUPrefillGraphRunner),
-    ):
-        monkeypatch.setattr(dispatcher, "current_gr_platform", platform_cls)
-        assert dispatcher.get_active_prefill_graph_runner_class() is runner_cls
-        assert isinstance(BeamPrefillGraphRunner(runner, buckets=[512]), runner_cls)
+    monkeypatch.setattr(dispatcher, "current_gr_platform", CudaGRPlatform)
+    assert dispatcher.get_active_prefill_graph_runner_class() is GPUPrefillGraphRunner
+    assert isinstance(BeamPrefillGraphRunner(runner, buckets=[512]), GPUPrefillGraphRunner)
 
     vendor = FakeGRPlatform()
     monkeypatch.setattr(dispatcher, "current_gr_platform", lambda: vendor)
@@ -300,199 +260,6 @@ def test_platform_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
     custom = BeamPrefillGraphRunner(runner)
     assert isinstance(custom, VendorRunner)
     assert custom.model_runner is runner
-
-
-class MockNPUAttnBuilder:
-    def __init__(self) -> None:
-        self.num_heads_q = 8
-        self.num_kv_heads = 8
-        self.block_size = 16
-        self.npu_causal_atten_mask = None
-
-
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("bucket", "expected_reqs", "expected_lens", "expected_cols"),
-    [
-        # Small buckets: fewer tokens than the dummy width must not produce
-        # zero-length requests, and the block table must still cover seq_len.
-        (1, 1, [1], 1),
-        (4, 4, [1, 1, 1, 1], 1),
-        (16, 8, [2] * 8, 1),
-        (128, 8, [16] * 8, 1),
-        # Uneven split across a block boundary: the longest request needs an
-        # extra block-table column even though base_len fits in one.
-        (129, 8, [17] + [16] * 7, 2),
-    ],
-)
-def test_npu_dummy_metadata_per_bucket(
-    bucket: int, expected_reqs: int, expected_lens: list[int], expected_cols: int
-) -> None:
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    npu_runner = NPUPrefillGraphRunner(MockModelRunner(), buckets=[bucket])
-    builder = MockNPUAttnBuilder()
-    meta = npu_runner._build_dummy_metadata(bucket, builder, npu_runner.buffers[bucket])
-
-    assert meta.num_reqs == expected_reqs
-    assert meta.seq_lens_cpu == expected_lens
-    assert meta.num_actual_tokens == bucket
-    assert meta.query_start_loc_cpu[0] == 0
-    assert meta.query_start_loc_cpu[-1] == bucket
-    # Structural FIA input contract, checked for every bucket in the grid.
-    assert all(length > 0 for length in meta.seq_lens_cpu)
-    assert sum(meta.seq_lens_cpu) == bucket
-    assert meta.block_table.shape[0] == meta.num_reqs
-    assert meta.block_table.shape[1] == expected_cols
-    assert meta.block_table.shape[1] * builder.block_size >= max(meta.seq_lens_cpu)
-
-
-def test_build_update_lists_pad_absorption() -> None:
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import build_update_lists
-
-    # No padding: lists mirror the real per-request token counts.
-    qlen_list, kvlen_list = build_update_lists([32, 32], 64)
-    assert qlen_list == [32, 64]
-    assert kvlen_list == [32, 32]
-
-    # Padding absorbed by the last request (lists must sum to the bucket).
-    qlen_list, kvlen_list = build_update_lists([48, 16], 128)
-    assert qlen_list == [48, 128]
-    assert kvlen_list == [48, 80]
-
-    qlen_list, kvlen_list = build_update_lists([24, 20, 20], 64)
-    assert qlen_list == [24, 44, 64]
-    assert kvlen_list == [24, 20, 20]
-
-    qlen_list, kvlen_list = build_update_lists([64], 128)
-    assert qlen_list == [128]
-    assert kvlen_list == [128]
-
-
-def test_npu_dummy_metadata_and_bucket_registry() -> None:
-    from types import SimpleNamespace
-
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    runner = MockModelRunner()
-    npu_runner = NPUPrefillGraphRunner(runner, buckets=[128])
-    builder = MockNPUAttnBuilder()
-    buf = npu_runner.buffers[128]
-
-    meta = npu_runner._build_dummy_metadata(128, builder, buf)
-    assert meta.num_reqs == 8
-    assert meta.num_actual_tokens == 128
-    assert meta.is_prefill_graph_exec is True
-    assert meta.query_start_loc_cpu[0] == 0
-    assert meta.query_start_loc_cpu[-1] == 128
-    assert len(meta.query_start_loc_cpu) == 9
-    assert len(meta.seq_lens_cpu) == 8
-    assert sum(meta.seq_lens_cpu) == 128
-    assert meta.block_table.shape == (8, 1)
-    assert meta.num_heads == 8 and meta.num_kv_heads == 8 and meta.block_size == 16
-
-    # No graph captured yet.
-    assert npu_runner.has_captured_graph(128, 3) is False
-
-    # One graph per bucket covers every supported num_reqs.
-    buf.captured_graphs[1] = object()
-    npu_runner.entries[128] = SimpleNamespace()
-    assert npu_runner.has_captured_graph(128, 1) is True
-    assert npu_runner.has_captured_graph(128, 8) is True
-    assert npu_runner.has_captured_graph(128, 9) is False
-    assert npu_runner.has_captured_graph(256, 1) is False
-
-    # Replay without a real NPU capture falls back to None (no torch.npu calls).
-    assert (
-        npu_runner.execute_model_prefill(
-            bucket=128,
-            input_ids=torch.zeros(64, dtype=torch.int32),
-            positions=torch.zeros(64, dtype=torch.int64),
-            slot_mapping=torch.zeros(64, dtype=torch.int64),
-            num_scheduled_tokens=[32, 32],
-        )
-        is None
-    )
-
-
-def test_build_update_lists_from_metadata() -> None:
-    from types import SimpleNamespace
-
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import (
-        build_update_lists_from_metadata,
-    )
-
-    # Fresh prefill: metadata lists equal the token-count version.
-    meta = SimpleNamespace(
-        query_start_loc_cpu=[0, 30, 64],
-        seq_lens_cpu=[30, 64],
-        num_reqs=2,
-        num_actual_tokens=64,
-    )
-    qlen_list, kvlen_list = build_update_lists_from_metadata(meta, [30, 34], 64)
-    assert qlen_list == [30, 64]
-    assert kvlen_list == [30, 64]
-
-    # Padding absorbed by the last request (lists must sum to the bucket).
-    qlen_list, kvlen_list = build_update_lists_from_metadata(meta, [30, 34], 128)
-    assert qlen_list == [30, 128]
-    assert kvlen_list == [30, 128]
-
-    # Cached / chunked prefill: KV lens include already-computed tokens.
-    meta = SimpleNamespace(
-        query_start_loc_cpu=[0, 30, 64],
-        seq_lens_cpu=[1024, 512],
-        num_reqs=2,
-        num_actual_tokens=64,
-    )
-    qlen_list, kvlen_list = build_update_lists_from_metadata(meta, [30, 34], 64)
-    assert qlen_list == [30, 64]
-    assert kvlen_list == [1024, 512]
-
-    # Missing metadata lists fall back to the token-count version.
-    meta = SimpleNamespace(
-        query_start_loc_cpu=None, seq_lens_cpu=None, num_reqs=2, num_actual_tokens=64
-    )
-    qlen_list, kvlen_list = build_update_lists_from_metadata(meta, [48, 16], 64)
-    assert qlen_list == [48, 64]
-    assert kvlen_list == [48, 16]
-
-
-def test_npu_capture_buffers_int32_slot_mapping() -> None:
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    runner = MockModelRunner()
-    npu_runner = NPUPrefillGraphRunner(runner, buckets=[128])
-    buf = npu_runner.buffers[128]
-    npu_runner._prepare_capture_buffers(buf, 128, runner)
-
-    # NPU's ATB ReshapeAndCache op requires int32 slot mappings with valid
-    # (non-negative) capture-time values; replay copies the real slots in.
-    assert buf.slot_mapping_buf.dtype == torch.int32
-    assert buf.slot_mapping_buf[0].item() == 0
-    assert buf.slot_mapping_buf[-1].item() == 127
-    assert buf.positions_buf.dtype == torch.int64
-    assert buf.positions_buf[-1].item() == 127
-
-
-def test_npu_shared_workspace_binding() -> None:
-    from types import SimpleNamespace
-
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    runner = MockModelRunner()
-    npu_runner = NPUPrefillGraphRunner(runner, buckets=[128, 512])
-
-    # Before any capture establishes the shared workspace, entries keep None
-    # and size their own workspace during capture.
-    entry = SimpleNamespace(workspace=None)
-    npu_runner._bind_entry_workspace(entry)
-    assert entry.workspace is None
-
-    # After the largest bucket establishes the shared workspace, smaller
-    # buckets reuse it instead of sizing their own.
-    npu_runner.shared_workspace = "ws"
-    npu_runner._bind_entry_workspace(entry)
-    assert entry.workspace == "ws"
 
 
 def test_bucket_clamp_to_max_num_batched_tokens() -> None:
@@ -571,8 +338,6 @@ def test_prefill_capture_policy_and_explicit_wider_sizes(sizes: Any) -> None:
 def test_custom_b4_bucket_limit_uses_total_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
     runner = MockModelRunner()
     from dataclasses import replace
 
@@ -589,7 +354,6 @@ def test_custom_b4_bucket_limit_uses_total_tokens(monkeypatch: pytest.MonkeyPatc
         config, deployment=DeploymentOptions(prefill_token_buckets=(4, 8, 12, 24))
     ).write_to_vllm_config(runner.vllm_config)
     assert BeamPrefillGraphRunner(runner, buckets=[4, 8, 12, 24]).buckets == [4, 8, 12, 24]
-    assert NPUPrefillGraphRunner(runner, buckets=[4, 8, 12, 24]).buckets == [4, 8]
 
 
 @pytest.mark.l1  # type: ignore[misc]
@@ -625,31 +389,6 @@ def test_b4_capture_geometry_respects_per_request_model_limit() -> None:
     assert _capture_query_len(24, 8, True) == 8
     with pytest.raises(ValueError, match="per-request model limit"):
         _capture_request_lengths(36, 4, 8, True)
-
-
-def test_npu_max_kvlen_from_model_config() -> None:
-    from types import SimpleNamespace
-
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    # Direct model_config attribute.
-    runner: Any = SimpleNamespace(
-        device=torch.device("cpu"),
-        model_config=SimpleNamespace(max_model_len=40960),
-    )
-    assert NPUPrefillGraphRunner._get_max_kvlen(runner) == 40960
-
-    # Fallback through vllm_config.
-    runner = SimpleNamespace(
-        device=torch.device("cpu"),
-        model_config=None,
-        vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=8192)),
-    )
-    assert NPUPrefillGraphRunner._get_max_kvlen(runner) == 8192
-
-    # Missing config -> 0 (workspace sized from capture lengths).
-    runner = MockModelRunner()
-    assert NPUPrefillGraphRunner._get_max_kvlen(runner) == 0
 
 
 def test_gpu_replay_falls_back_without_slot_mapping() -> None:
@@ -1196,77 +935,6 @@ def test_fatal_prefill_capture_error_reaches_worker_startup(
     capture_async.assert_called_once_with(worker, False)
     assert raised.value is error
     assert events == ["native"]
-
-
-def test_npu_bsnd_config_defaults_off() -> None:
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    runner = NPUPrefillGraphRunner(MockModelRunner(), buckets=[128])
-    assert runner._BSND_CAPTURE_SPECS == ()
-
-
-def test_bsnd_metadata_resources_are_instance_owned() -> None:
-    from vllm_gr.v1.attention.backends.beam_attn_metadata import BeamAttentionMetadata
-
-    tensor = torch.empty(0)
-    first = BeamAttentionMetadata(0, 0, tensor, 0, tensor, tensor, tensor)
-    second = BeamAttentionMetadata(0, 0, tensor, 0, tensor, tensor, tensor)
-    assert first.prefill_fia_layout == second.prefill_fia_layout == "TND"
-    assert first.bsnd_resources == second.bsnd_resources == {}
-    first.bsnd_resources["workspaces"] = {"probe": object()}
-    assert second.bsnd_resources == {}
-
-
-def test_npu_bsnd_config_validates_runner_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    runner = NPUPrefillGraphRunner(
-        MockModelRunner(npu_bsnd_capture_specs="1024,4;512,4"), buckets=[512, 1024]
-    )
-    assert runner._BSND_CAPTURE_SPECS == ((512, 4), (1024, 4))
-    with pytest.raises(ValueError, match="1024 is not in configured prefill buckets"):
-        NPUPrefillGraphRunner(MockModelRunner(npu_bsnd_capture_specs="1024,4;512,4"), buckets=[512])
-
-
-def test_npu_prefill_capture_skips_native_attention() -> None:
-    from vllm_gr.v1.attention.backends.beam_attn_metadata import (
-        BeamAttentionMetadataBuilder,
-    )
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    class NativeBuilder:
-        pass
-
-    class Group:
-        def __init__(self, builder: object) -> None:
-            self.builder = builder
-
-        def get_metadata_builder(self, _index: int) -> object:
-            return self.builder
-
-    beam_builder = object.__new__(BeamAttentionMetadataBuilder)
-    beam_runner = SimpleNamespace(attn_groups=[[Group(beam_builder)]])
-    native_runner = SimpleNamespace(attn_groups=[[Group(NativeBuilder())]])
-    assert NPUPrefillGraphRunner._supports_beam_prefill_capture(beam_runner) is True
-    assert NPUPrefillGraphRunner._supports_beam_prefill_capture(native_runner) is False
-
-
-def test_npu_prefill_capture_skips_mixed_attention_groups() -> None:
-    from vllm_gr.v1.attention.backends.beam_attn_metadata import (
-        BeamAttentionMetadataBuilder,
-    )
-    from vllm_gr.v1.worker.npu.npu_prefill_graph_runner import NPUPrefillGraphRunner
-
-    class Group:
-        def __init__(self, builder: object) -> None:
-            self.builder = builder
-
-        def get_metadata_builder(self, _index: int) -> object:
-            return self.builder
-
-    beam_builder = object.__new__(BeamAttentionMetadataBuilder)
-    runner = SimpleNamespace(attn_groups=[[Group(beam_builder), Group(object())]])
-    assert NPUPrefillGraphRunner._supports_beam_prefill_capture(runner) is False
 
 
 @pytest.mark.l1  # type: ignore[misc]

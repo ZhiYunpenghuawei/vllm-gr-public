@@ -194,7 +194,7 @@ def schedule_warmup_gc_freeze() -> bool:
 
 
 def freeze_gc_after_graph_capture(runner: Any) -> None:
-    """Freeze the serving-time heap once CUDA-graph capture has finished.
+    """Freeze the serving-time heap once graph capture has finished.
 
     GC state is process-local. vLLM freezes the EngineCore startup heap, but
     that does not reliably cover graph objects created in a separate Worker
@@ -215,7 +215,7 @@ def freeze_gc_after_graph_capture(runner: Any) -> None:
         _freeze_serving_gc(raise_thresholds=False)
         setattr(runner, _GC_FROZEN_AFTER_CAPTURE_MARKER, True)
         logger.info(
-            "vllm-gr: froze GC heap after CUDA-graph capture "
+            "vllm-gr: froze GC heap after graph capture "
             "(gen thresholds now scan serving allocations only)"
         )
     except Exception:

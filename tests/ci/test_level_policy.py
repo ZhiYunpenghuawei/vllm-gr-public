@@ -91,7 +91,7 @@ def test_cascade_gpu_specification_partitions_full_parameter_matrix() -> None:
     assert resolve_level(INVENTORY, key, {**baseline, "dtype": "float64"}, {}) == "l4"
 
 
-def test_npu_case_specification_partitions_full_parameter_matrix() -> None:
+def test_nested_case_specification_partitions_full_parameter_matrix() -> None:
     @dataclass
     class Case:
         batch_size: int
@@ -103,7 +103,32 @@ def test_npu_case_specification_partitions_full_parameter_matrix() -> None:
         block_size: int
         dtype: str
 
-    key = "tests/kernels/attention/test_cascade_beam_attn_npu.py::test_beam_cascade_npu"
+    # Synthetic nested dataclass rule exercises the classifier without an obsolete device test.
+    key = "tests/kernels/test_example.py::test_case"
+    inventory = {
+        key: {
+            "default": "l4",
+            "rules": [
+                {
+                    "level": "l2",
+                    "when": {
+                        "all": [
+                            {"ref": "params.case.batch_size", "eq": 1},
+                            {"ref": "params.case.beam_width", "eq": 16},
+                            {
+                                "ref": "params.case.scenario",
+                                "in": [[1, 32, 8], [1, 128, 1], [1, 32, 7]],
+                            },
+                            {"ref": "params.case.num_query_heads", "in": [4, 8]},
+                            {"ref": "params.case.head_size", "eq": 128},
+                            {"ref": "params.case.block_size", "eq": 128},
+                            {"ref": "params.case.dtype", "in": ["float16", "bfloat16"]},
+                        ]
+                    },
+                }
+            ],
+        }
+    }
     vals = product(
         [1, 4],
         [16, 32],
@@ -117,7 +142,7 @@ def test_npu_case_specification_partitions_full_parameter_matrix() -> None:
     for batch, beam, scenario, (qh, kvh), head_size, block, dtype in vals:
         levels.append(
             resolve_level(
-                INVENTORY,
+                inventory,
                 key,
                 {"case": Case(batch, beam, scenario, qh, kvh, head_size, block, dtype)},
                 {},
@@ -128,34 +153,13 @@ def test_npu_case_specification_partitions_full_parameter_matrix() -> None:
     assert levels.count("l4") == 276
     assert (
         resolve_level(
-            INVENTORY, key, {"case": Case(1, 16, (1, 32, 8), 4, 4, 128, 128, "float32")}, {}
+            inventory, key, {"case": Case(1, 16, (1, 32, 8), 4, 4, 128, 128, "float32")}, {}
         )
         == "l4"
     )
 
 
-def test_cpu_npu_and_gpu_parameters_have_exclusive_levels() -> None:
-    key = "tests/v1/worker/test_npu_model_runner_patch.py::test_npu_single_step_filters_candidates_before_return_limit"
-    for device, batch, width, case in product(["cpu", "npu"], [1, 4], [1, 2], ["nan", "finite"]):
-        expected = "l1" if device == "cpu" else "l2" if batch == width == 1 else "l4"
-        assert (
-            resolve_level(
-                INVENTORY,
-                key,
-                {"device": device, "batch_size": batch, "result_width": width, "case": case},
-                {},
-            )
-            == expected
-        )
-    assert (
-        resolve_level(
-            INVENTORY,
-            key,
-            {"device": "npu", "batch_size": 1, "result_width": 1, "case": "future"},
-            {},
-        )
-        == "l4"
-    )
+def test_cpu_and_gpu_parameters_have_exclusive_levels() -> None:
     key = "tests/ops/test_sliced_logits.py::test_native_logits_forward"
     common = {
         "device": "cuda",
@@ -169,26 +173,16 @@ def test_cpu_npu_and_gpu_parameters_have_exclusive_levels() -> None:
     assert resolve_level(INVENTORY, key, {**common, "device": "cpu"}, {}) == "l1"
     assert resolve_level(INVENTORY, key, {**common, "dtype": "float64"}, {}) == "l4"
     assert resolve_level(INVENTORY, key, {**common, "slice_mode": "future"}, {}) == "l4"
-    key = "tests/kernels/test_beam_attn_npu_xllm_parity.py::test_cascade_execution_batch_matches_individual_requests"
-    assert (
-        resolve_level(
-            INVENTORY, key, {"batch_size": 1, "decode_step": 0, "num_query_heads": 32}, {}
-        )
-        == "l2"
-    )
     key = (
         "tests/kernels/test_rec_constrained_topk_cuda.py::test_cuda_supported_specialization_matrix"
     )
     assert resolve_level(INVENTORY, key, {"dtype": "float32", "step": 0, "top_k": 8}, {}) == "l4"
 
 
-def test_runtime_option_and_default_device_are_classified() -> None:
+def test_runtime_option_is_classified() -> None:
     key = "tests/entrypoints/openai/test_serving_beam_search.py::test_serving_beam_search"
     assert resolve_level(INVENTORY, key, {}, {"loops": 1}) == "l3"
     assert resolve_level(INVENTORY, key, {}, {"loops": 2}) == "l4"
-    key = "tests/constraints/test_constraint_table_execution.py::test_npu_default_device_falls_back_without_crash"
-    assert resolve_level(INVENTORY, key, {"device_class": "cpu"}, {}) == "l1"
-    assert resolve_level(INVENTORY, key, {"device_class": "accelerator"}, {}) == "l2"
 
 
 def _make_sample(pytester: pytest.Pytester) -> Path:
@@ -333,12 +327,15 @@ def test_default(device_class):
     raise AssertionError('collect-only must not execute the test')
 """
     )
-    original = "tests/constraints/test_constraint_table_execution.py::test_npu_default_device_falls_back_without_crash"
+    policy = {
+        "rules": [
+            {"level": "l1", "when": {"ref": "params.device_class", "eq": "cpu"}},
+            {"level": "l2", "when": {"ref": "params.device_class", "eq": "accelerator"}},
+        ]
+    }
     manifest = pytester.path / "levels.json"
     manifest.write_text(
-        json.dumps(
-            {"version": 1, "tests": {"test_default_device.py::test_default": INVENTORY[original]}}
-        ),
+        json.dumps({"version": 1, "tests": {"test_default_device.py::test_default": policy}}),
         encoding="utf-8",
     )
     result = pytester.runpytest(

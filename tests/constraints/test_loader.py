@@ -5,30 +5,33 @@
 from __future__ import annotations
 
 import gc
-import importlib
 import weakref
-from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
 from tests.constraints.test_table import make_table
+from tests.helpers.cuda_platform import CudaGRPlatform
 from vllm_gr.config import ConstraintBackendKind, ConstraintTableSpec
-from vllm_gr.constraints import loader
+from vllm_gr.constraints import cuda_loader, loader
 from vllm_gr.constraints.artifact import save_constraint_table_artifact
-from vllm_gr.constraints.backend import INVALID_LOGIT, ConstraintBackendInfo
-from vllm_gr.constraints.npu_backend import NPUConstraintBackend
-from vllm_gr.constraints.table import CONSTRAINT_TABLE_TENSOR_NAMES, ConstraintTable
-from vllm_gr.constraints.validity import (
-    constraint_candidate_counts,
-    valid_mask_from_counts,
+from vllm_gr.constraints.backend import (
+    INVALID_LOGIT,
+    ConstraintBackendInfo,
+    ConstraintMetadata,
+    ConstraintOutput,
 )
-from vllm_gr.ops.rec_constrained_topk import rec_constrained_topk_torch
+from vllm_gr.constraints.cpu_backend import CPUConstraintBackend
+from vllm_gr.constraints.table import CONSTRAINT_TABLE_TENSOR_NAMES, ConstraintTable
 
-npu_op_module = importlib.import_module("vllm_gr.ops.npu.rec_constrained_topk")
+if TYPE_CHECKING:
+    from vllm_gr.constraints.cuda_backend import CUDAConstraintBackend
 
 
 def _config(path: Path, digest: str, **overrides: object) -> ConstraintTableSpec:
@@ -80,13 +83,98 @@ def test_cpu_loader_constructs_info_from_canonical_artifact(tmp_path: Path) -> N
     assert backend.info.max_rows == 7
 
 
-@pytest.mark.parametrize("backend", [ConstraintBackendKind.CUDA, ConstraintBackendKind.NPU])
-def test_npu_top_k_limit_fails_before_artifact_io(
-    monkeypatch: pytest.MonkeyPatch, backend: ConstraintBackendKind
+@pytest.mark.parametrize("selector", ["auto", "platform", "example_backend"])
+def test_platform_loader_routes_opaque_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str
 ) -> None:
+    path = tmp_path / "table.safetensors"
+    table = make_table()
+    digest = save_constraint_table_artifact(table, path)
+    backend = SimpleNamespace(close=Mock())
+
+    def create_backend(loaded_table: ConstraintTable, **kwargs: object) -> SimpleNamespace:
+        # The persisted artifact supplies the authoritative metadata, including
+        # its digest. The factory must report that metadata, not pre-save data.
+        backend.info = ConstraintBackendInfo(
+            loaded_table.metadata, "example_backend", 4, 2, 0, loaded_table.total_bytes
+        )
+        return backend
+
+    platform = SimpleNamespace(
+        backend_id="example",
+        canonical_constraint_backend="example_backend",
+        validate_constraint_backend=Mock(),
+        create_constraint_backend=Mock(side_effect=create_backend),
+    )
+    monkeypatch.setattr("vllm_gr.platforms.table.current_gr_platform", lambda: platform)
+    device = torch.device("cpu")
+    result = loader.load_constraint_backend(
+        _config(path, digest, backend=selector),
+        device=device,
+        vocab_size=6,
+        dtype=torch.float32,
+        max_rows=2,
+    )
+    assert result is backend
+    platform.validate_constraint_backend.assert_called_once_with(
+        device=device, dtype=torch.float32, max_rows=2, max_top_k=4
+    )
+    args, kwargs = platform.create_constraint_backend.call_args
+    assert args[0].metadata.artifact_digest == digest
+    assert args[0].metadata.tokenizer_digest == table.metadata.tokenizer_digest
+    assert kwargs == dict(device=device, dtype=torch.float32, max_rows=2, max_top_k=4)
+    backend.close.assert_not_called()
+
+
+def test_platform_loader_rejects_mismatch_and_closes_returned_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "table.safetensors"
+    table = make_table()
+    digest = save_constraint_table_artifact(table, path)
+    backend = SimpleNamespace(close=Mock())
+
+    def create_backend(loaded_table: ConstraintTable, **kwargs: object) -> SimpleNamespace:
+        backend.info = ConstraintBackendInfo(
+            loaded_table.metadata, "wrong_backend", 4, 2, 0, loaded_table.total_bytes
+        )
+        return backend
+
+    platform = SimpleNamespace(
+        backend_id="example",
+        canonical_constraint_backend="example_backend",
+        validate_constraint_backend=Mock(),
+        create_constraint_backend=Mock(side_effect=create_backend),
+    )
+    monkeypatch.setattr("vllm_gr.platforms.table.current_gr_platform", lambda: platform)
+    device = torch.device("cpu")
+    with pytest.raises(ValueError, match="does not match the selected"):
+        loader.load_constraint_backend(
+            _config(path, digest, backend="wrong_backend"),
+            device=device,
+            vocab_size=6,
+            dtype=torch.float32,
+            max_rows=2,
+        )
+    platform.validate_constraint_backend.assert_not_called()
+    platform.create_constraint_backend.assert_not_called()
+    with pytest.raises(ValueError, match="incompatible constraint metadata"):
+        loader.load_constraint_backend(
+            _config(path, digest, backend="example_backend"),
+            device=device,
+            vocab_size=6,
+            dtype=torch.float32,
+            max_rows=2,
+        )
+    backend.close.assert_called_once_with()
+
+
+def test_cuda_top_k_limit_fails_before_artifact_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("triton")
+    monkeypatch.setattr("vllm_gr.platforms.table.current_gr_platform", CudaGRPlatform)
     config = ConstraintTableSpec(
         enabled=True,
-        backend=backend,
+        backend="cuda",
         path="/does/not/exist",
         artifact_digest="sha256:" + "a" * 64,
         tokenizer_digest="sha256:" + "b" * 64,
@@ -107,32 +195,12 @@ def test_npu_top_k_limit_fails_before_artifact_io(
         )
 
 
-def test_strict_npu_resolver_never_returns_torch_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(npu_op_module, "_custom_ops", lambda: None)
-    with pytest.raises(RuntimeError, match="custom_ops_lib"):
-        npu_op_module.resolve_rec_constrained_topk_npu()
-
-
-def test_npu_known_last_vocab_prefix_limitation_fails_closed() -> None:
-    table = make_table(
-        first_token_ids=np.asarray([1, 3, 5], dtype=np.int32),
-        prefix1_offsets=np.asarray([0, 0, 2, 2, 3, 3, 4], dtype=np.int32),
-        prefix1_values=np.asarray([2, 4, 5, 0], dtype=np.int32),
-        prefix1_pair_keys=np.asarray([8, 10, 23, 30], dtype=np.int64),
-        prefix2_value_offsets=np.asarray([0, 2, 3, 5, 6], dtype=np.int32),
-        prefix2_values=np.asarray([0, 1, 3, 1, 4, 2], dtype=np.int32),
-    )
-    with pytest.raises(RuntimeError, match="vocab_size - 1"):
-        loader._reject_unsupported_last_vocab_prefix(table)  # noqa: SLF001
-
-
 @pytest.mark.parametrize("failure_index", range(1, 7))
 def test_upload_failure_rethrows_original_exception_and_releases_tensors(
     failure_index: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("triton")
     table = make_table()
     error = RuntimeError("third upload failed")
     references: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -148,12 +216,11 @@ def test_upload_failure_rethrows_original_exception_and_releases_tensors(
         references.append(weakref.ref(tensor))
         return tensor
 
-    monkeypatch.setattr(loader, "_upload_table_tensor", upload)
+    monkeypatch.setattr(cuda_loader, "_upload_table_tensor", upload)
     with pytest.raises(RuntimeError) as raised:
-        loader._upload_npu_backend(  # noqa: SLF001
+        cuda_loader._upload_cuda_backend(  # noqa: SLF001
             table,
             device=torch.device("cpu"),
-            op=lambda *args: (torch.empty(0), torch.empty(0)),
             max_top_k=2,
             max_rows=2,
         )
@@ -165,6 +232,7 @@ def test_upload_failure_rethrows_original_exception_and_releases_tensors(
 def test_upload_sync_failure_releases_all_created_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("triton")
     table = make_table()
     error = RuntimeError("upload stream sync failed")
     references: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -179,13 +247,12 @@ def test_upload_sync_failure_releases_all_created_tensors(
         del device
         raise error
 
-    monkeypatch.setattr(loader, "_upload_table_tensor", upload)
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", fail_sync)
+    monkeypatch.setattr(cuda_loader, "_upload_table_tensor", upload)
+    monkeypatch.setattr(cuda_loader, "_synchronize_current_cuda_stream", fail_sync)
     with pytest.raises(RuntimeError) as raised:
-        loader._upload_npu_backend(  # noqa: SLF001
+        cuda_loader._upload_cuda_backend(  # noqa: SLF001
             table,
             device=torch.device("cpu"),
-            op=lambda *args: (torch.empty(0), torch.empty(0)),
             max_top_k=2,
             max_rows=2,
         )
@@ -198,127 +265,32 @@ def test_unique_storage_memory_is_deduplicated() -> None:
     base = torch.zeros(16, dtype=torch.int32)
     other = torch.zeros(3, dtype=torch.int64)
     tensors = {"base": base, "view": base[2:8], "other": other}
-    assert loader._unique_storage_bytes(tensors) == (  # noqa: SLF001
+    assert cuda_loader._unique_storage_bytes(tensors) == (  # noqa: SLF001
         base.untyped_storage().nbytes() + other.untyped_storage().nbytes()
     )
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-@pytest.mark.parametrize("eligible", [False, True])
-def test_npu_stage_vocab_allocation_requires_explicit_eligible_worker(
-    enabled: bool, eligible: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    table = make_table()
-    allocations: list[ConstraintTable] = []
-
-    def build_stage_vocab(table: ConstraintTable, *args: object) -> None:
-        allocations.append(table)
-
-    monkeypatch.setattr(loader, "build_npu_stage_vocab", build_stage_vocab)
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", lambda device: None)
-    backend, _ = loader._upload_npu_backend(  # noqa: SLF001
-        table,
-        device=torch.device("cpu"),
-        op=lambda *args: (torch.empty(0), torch.empty(0)),
-        max_top_k=2,
-        max_rows=2,
-        enable_npu_stage_vocab=eligible,
-        stage_lm_head=enabled,
-    )
-    try:
-        assert allocations == ([table] if eligible and enabled else [])
-        assert backend.stage_vocab is None
-    finally:
-        backend.close()
-
-
-def test_direct_npu_upload_does_not_allocate_stage_vocab_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        loader,
-        "build_npu_stage_vocab",
-        lambda *args, **kwargs: pytest.fail("Direct backend upload has no eligible runner"),
-    )
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", lambda device: None)
-    backend, _ = loader._upload_npu_backend(  # noqa: SLF001
-        make_table(),
-        device=torch.device("cpu"),
-        op=lambda *args: (torch.empty(0), torch.empty(0)),
-        max_top_k=2,
-        max_rows=2,
-    )
-    try:
-        assert backend.stage_vocab is None
-    finally:
-        backend.close()
-
-
 def _readiness_backend(
-    op: Callable[..., tuple[torch.Tensor, torch.Tensor]],
-    *,
-    table: ConstraintTable,
-    top_k: int,
-) -> NPUConstraintBackend:
+    table: ConstraintTable, top_k: int
+) -> tuple[CUDAConstraintBackend, CPUConstraintBackend]:
     tensors = {
         name: torch.from_numpy(np.array(getattr(table, name), copy=True))
         for name in CONSTRAINT_TABLE_TENSOR_NAMES
     }
-    return NPUConstraintBackend(
+    pytest.importorskip("triton")
+    from vllm_gr.constraints.cuda_backend import CUDAConstraintBackend
+
+    backend = CUDAConstraintBackend(
         **tensors,
-        info=ConstraintBackendInfo(
-            table_metadata=table.metadata,
-            backend=ConstraintBackendKind.NPU,
-            max_top_k=top_k,
-            max_rows=2,
-            host_memory_bytes=0,
-            device_memory_bytes=table.total_bytes,
+        info=ConstraintBackendInfo(table.metadata, "cuda", top_k, 2, 0, table.total_bytes),
+    )
+    oracle = CPUConstraintBackend(
+        table,
+        ConstraintBackendInfo(
+            table.metadata, ConstraintBackendKind.CPU, top_k, 2, table.total_bytes, 0
         ),
-        op=op,
     )
-
-
-def _fused_candidate_set_op(*args: object) -> tuple[torch.Tensor, torch.Tensor]:
-    """Simulate the fused NPU operator: torch selection, candidate-set scoring.
-
-    NPU readiness validates the fused operator's established candidate-set
-    normalization domain.  Readiness cases keep every legal candidate within
-    the Top-K slots, so the candidate set equals the valid selected slots.
-    """
-    tokens, _ = rec_constrained_topk_torch(*args)
-    logits = cast(torch.Tensor, args[0])
-    temperatures = cast(torch.Tensor, args[8])
-    prefix1_offsets = cast(torch.Tensor, args[3])
-    current_step = int(cast(int, args[9]))
-    top_k = int(cast(int, args[10]))
-    counts = constraint_candidate_counts(
-        cast(torch.Tensor, args[1]),
-        cast(torch.Tensor, args[2]),
-        prefix1_offsets,
-        cast(torch.Tensor, args[5]),
-        cast(torch.Tensor, args[6]),
-        current_step=current_step,
-        vocab_size=int(prefix1_offsets.numel()) - 1,
-    )
-    valid = valid_mask_from_counts(counts, top_k)
-    divisor = torch.where(
-        temperatures == 0,
-        torch.ones_like(temperatures),
-        temperatures,
-    ).reshape(-1, 1)
-    scores = logits.float().gather(1, tokens.to(torch.long).clamp(0, logits.shape[1] - 1)) / divisor
-    scores = torch.where(torch.isnan(scores), torch.full_like(scores, float("-inf")), scores)
-    log_denominators = torch.logsumexp(
-        torch.where(valid, scores, torch.full_like(scores, float("-inf"))),
-        dim=1,
-        keepdim=True,
-    )
-    logprobs = torch.where(
-        valid,
-        scores - log_denominators,
-        torch.full_like(scores, INVALID_LOGIT),
-    )
-    return tokens.to(torch.int32), logprobs.contiguous()
+    return backend, oracle
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -327,139 +299,90 @@ def test_readiness_accepts_normalized_reference_at_top_k_256(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     table = make_table(first_token_ids=np.asarray([1, 3, 4], dtype=np.int32))
-
-    backend = _readiness_backend(_fused_candidate_set_op, table=table, top_k=256)
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", lambda device: None)
+    backend, oracle = _readiness_backend(table, 256)
+    monkeypatch.setattr(cuda_loader, "_synchronize_current_cuda_stream", lambda device: None)
+    monkeypatch.setattr(
+        type(backend),
+        "_select_for_readiness",
+        lambda self, logits, metadata: oracle.select(logits, metadata),
+    )
     try:
-        loader._run_npu_readiness(  # noqa: SLF001
+        cuda_loader._run_cuda_readiness(
             backend,
-            cases=loader._readiness_cases(table, 256),  # noqa: SLF001
+            cases=cuda_loader._readiness_cases(table, 256),
             device=torch.device("cpu"),
             dtype=dtype,
             max_rows=2,
         )
     finally:
         backend.close()
+        oracle.close()
 
 
 @pytest.mark.parametrize("failure_mode", ["raw", "ignore_temperature", "top_k_normalized"])
 def test_readiness_rejects_unnormalized_logprobs(
-    failure_mode: str,
-    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     table = make_table(first_token_ids=np.asarray([1, 3, 4], dtype=np.int32))
+    backend, oracle = _readiness_backend(table, 2)
 
-    def broken_op(*args: object) -> tuple[torch.Tensor, torch.Tensor]:
+    def bad_select(
+        self: CUDAConstraintBackend, logits: torch.Tensor, metadata: ConstraintMetadata
+    ) -> ConstraintOutput:
+        del self
         if failure_mode == "ignore_temperature":
-            modified = list(args)
-            temperatures = modified[8]
-            assert isinstance(temperatures, torch.Tensor)
-            modified[8] = torch.ones_like(temperatures)
-            tokens, logprobs = rec_constrained_topk_torch(*modified)
-            return tokens.to(torch.int32), logprobs
+            return oracle.select(
+                logits, replace(metadata, temperatures=torch.ones_like(metadata.temperatures))
+            )
+        output = oracle.select(logits, metadata)
+        scores = logits.gather(1, output.token_ids.long()).float()
+        if failure_mode == "top_k_normalized":
+            temp = metadata.temperatures.reshape(-1, 1)
+            scores = scores / torch.where(temp == 0, 1.0, temp)
+            scores = scores.masked_fill(~output.valid_mask, float("-inf"))
+            scores -= torch.logsumexp(scores, dim=1, keepdim=True)
+        return replace(output, logprobs=torch.where(output.valid_mask, scores, INVALID_LOGIT))
 
-        tokens, _ = rec_constrained_topk_torch(*args)
-        logits = args[0]
-        assert isinstance(logits, torch.Tensor)
-        selected_logits = logits.gather(1, tokens.to(torch.long)).float()
-        sequence_group = args[1]
-        current_step = args[9]
-        top_k = args[10]
-        assert isinstance(sequence_group, torch.Tensor)
-        assert isinstance(current_step, int)
-        assert isinstance(top_k, int)
-        counts = constraint_candidate_counts(
-            sequence_group,
-            cast(torch.Tensor, args[2]),
-            cast(torch.Tensor, args[3]),
-            cast(torch.Tensor, args[5]),
-            cast(torch.Tensor, args[6]),
-            current_step=current_step,
-            vocab_size=table.metadata.vocab_size,
-        )
-        valid = valid_mask_from_counts(counts, top_k)
-        if failure_mode == "raw":
-            logprobs = torch.where(
-                valid,
-                selected_logits,
-                torch.full_like(selected_logits, INVALID_LOGIT),
-            )
-        else:
-            temperatures = args[8]
-            assert isinstance(temperatures, torch.Tensor)
-            temperatures = temperatures.reshape(-1, 1)
-            temperatures = torch.where(
-                temperatures == 0,
-                torch.ones_like(temperatures),
-                temperatures,
-            )
-            selected_scores = (selected_logits / temperatures).masked_fill(~valid, float("-inf"))
-            logprobs = selected_scores - torch.logsumexp(selected_scores, dim=1, keepdim=True)
-            logprobs = torch.where(
-                valid,
-                logprobs,
-                torch.full_like(logprobs, INVALID_LOGIT),
-            )
-        return tokens.to(torch.int32), logprobs.contiguous()
-
-    backend = _readiness_backend(broken_op, table=table, top_k=2)
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", lambda device: None)
+    monkeypatch.setattr(type(backend), "_select_for_readiness", bad_select)
+    monkeypatch.setattr(cuda_loader, "_synchronize_current_cuda_stream", lambda device: None)
     try:
         with pytest.raises(RuntimeError, match="normalized reference"):
-            loader._run_npu_readiness(  # noqa: SLF001
+            cuda_loader._run_cuda_readiness(
                 backend,
-                cases=loader._readiness_cases(table, 2),  # noqa: SLF001
+                cases=cuda_loader._readiness_cases(table, 2),
                 device=torch.device("cpu"),
                 dtype=torch.float32,
                 max_rows=2,
             )
     finally:
         backend.close()
+        oracle.close()
 
 
-@pytest.mark.parametrize("failed_step", [0, 1, 2])
 def test_readiness_failure_closes_backend_and_preserves_exception(
-    failed_step: int,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     table = make_table()
-    tensors = {
-        name: torch.from_numpy(np.array(getattr(table, name), copy=True))
-        for name in CONSTRAINT_TABLE_TENSOR_NAMES
-    }
-    error = RuntimeError(f"step {failed_step} launch failed")
+    path = tmp_path / "table.safetensors"
+    digest = save_constraint_table_artifact(table, path)
+    backend, oracle = _readiness_backend(table, 2)
+    oracle.close()
+    error = RuntimeError("readiness launch failed")
 
-    def op(*args: object) -> tuple[torch.Tensor, torch.Tensor]:
-        if args[9] == failed_step:
-            raise error
-        return _fused_candidate_set_op(*args)
+    def fail_readiness(*args: object, **kwargs: object) -> None:
+        raise error
 
-    backend = NPUConstraintBackend(
-        **tensors,
-        info=ConstraintBackendInfo(
-            table_metadata=table.metadata,
-            backend=ConstraintBackendKind.NPU,
-            max_top_k=2,
-            max_rows=2,
-            host_memory_bytes=0,
-            device_memory_bytes=table.total_bytes,
-        ),
-        op=op,
-    )
-    monkeypatch.setattr(loader, "_synchronize_current_npu_stream", lambda device: None)
-    cases = loader._readiness_cases(table, 2)  # noqa: SLF001
+    monkeypatch.setattr("vllm_gr.platforms.table.current_gr_platform", CudaGRPlatform)
+    monkeypatch.setattr(cuda_loader, "_upload_cuda_backend", lambda *args, **kwargs: (backend, ()))
+    monkeypatch.setattr(cuda_loader, "_run_cuda_readiness", fail_readiness)
     with pytest.raises(RuntimeError) as raised:
-        try:
-            loader._run_npu_readiness(  # noqa: SLF001
-                backend,
-                cases=cases,
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-                max_rows=2,
-            )
-        except BaseException:
-            backend.close()
-            raise
+        loader.load_constraint_backend(
+            _config(path, digest, backend="cuda", max_top_k=2),
+            device=torch.device("cuda"),
+            vocab_size=6,
+            dtype=torch.float16,
+            max_rows=2,
+        )
     assert raised.value is error
     assert backend._first_token_ids is None  # noqa: SLF001
 

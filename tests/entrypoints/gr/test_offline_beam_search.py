@@ -202,7 +202,7 @@ def _run_offline_gr_beam_search_target(loops: int) -> None:
         f"gpu mem delta={(after_gpu - before_gpu) / 1024**3:.2f}GB"
     )
     # Host RSS includes hardware/runtime-specific one-time residency from
-    # PyTorch, CUDA/NPU, tokenizers, compilers, and IPC. Keep these values in
+    # PyTorch, CUDA, tokenizers, compilers, and IPC. Keep these values in
     # every test report, but enforce fixed thresholds only in a calibrated,
     # fixed-hardware memory job. General CI continues to gate functional Beam
     # Search correctness and explicit engine shutdown without applying a

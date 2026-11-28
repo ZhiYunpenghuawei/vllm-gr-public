@@ -61,7 +61,7 @@ def score_selected_tokens(
 
     # Score the FP32 window as-is: NaN logits intentionally stay non-finite so
     # a poisoned window surfaces the engine's protocol error (NaN logprobs ->
-    # beam_device_error), matching the fused CUDA kernel.  The per-row division
+    # beam_device_error), matching the fused implementation. The per-row division
     # stays fused inside logsumexp's reduction kernel, avoiding a materialized
     # copy+div of the divided window.
     row_logits = logits.float()

@@ -6,31 +6,18 @@ from __future__ import annotations
 
 import pytest
 
-from tests.helpers.ascend_platform import AscendGRPlatform
 from tests.helpers.cuda_platform import CudaGRPlatform
 
 cuda = CudaGRPlatform()
-npu = AscendGRPlatform()
 
 
-def test_npu_integration_passes_device() -> None:
-    """The device is optional and, when given, forwarded to the adapter."""
-    from vllm_gr.constraints.execution import NPUConstrainedTopKExecution
-
-    default_execution = npu.create_constrained_topk_execution()
-    explicit_execution = npu.create_constrained_topk_execution(device="cpu")
-
-    assert isinstance(default_execution, NPUConstrainedTopKExecution)
-    assert default_execution._device is None
-    assert isinstance(explicit_execution, NPUConstrainedTopKExecution)
-    assert explicit_execution._device == "cpu"
-
-
-def test_npu_integration_creates_independent_instances() -> None:
+def test_cuda_integration_creates_independent_instances() -> None:
     """Each call must create an independent stateful adapter (not a singleton)."""
-    # Table loading allocates tensors. Keep this CPU contract independent of NPU hardware.
-    first = npu.create_constrained_topk_execution(device="cpu")
-    second = npu.create_constrained_topk_execution(device="cpu")
+    # Table loading validates the CUDA kernel's capacity, even on host tensors.
+    pytest.importorskip("triton")
+    # Keep this contract independent of CUDA hardware.
+    first = cuda.create_constrained_topk_execution(device="cpu")
+    second = cuda.create_constrained_topk_execution(device="cpu")
 
     assert first is not second
     # Loading tables on one must not affect the other.
@@ -52,7 +39,7 @@ def test_npu_integration_creates_independent_instances() -> None:
 
 def test_cuda_integration_returns_cuda_execution_and_preserves_device() -> None:
     """CUDA creates its execution and forwards an explicit device."""
-    from vllm_gr.constraints.execution import CUDAConstrainedTopKExecution
+    from vllm_gr.constraints.cuda_execution import CUDAConstrainedTopKExecution
 
     default_execution = cuda.create_constrained_topk_execution()
     explicit_execution = cuda.create_constrained_topk_execution(device="cuda")

@@ -15,15 +15,16 @@ from vllm_gr.v1.attention.backends.beam_attn_metadata import (
     BeamAttentionMetadataBuilder,
 )
 from vllm_gr.v1.beam import BEAM_DATA_VAR
-from vllm_gr.v1.beam.attention_context import BeamAttentionContext
 from vllm_gr.v1.beam.session import BeamSearchSession
+from vllm_gr.v1.worker.cuda.attention_context import (
+    CudaBeamAttentionContext as BeamAttentionContext,
+)
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 # (queries per beam, complete KV length, suffix KV length).
 CASES = [(1, 32, 8), (1, 64, 4), (1, 16, 4), (1, 16, 7), (1, 128, 1), (1, 32, 7)]
 NO_SHARED_PREFIX_CASE = (1, 8, 8)
 GPU_CASES = [NO_SHARED_PREFIX_CASE, *CASES]
-NPU_CASES = CASES
 
 
 @dataclass
@@ -100,7 +101,6 @@ def prepare_inputs(
     session.begin_session(rows, prefix_len)
     session._state.decode_step = suffix_kv_len - 1
     context.decode_step_buf.fill_(suffix_kv_len - 1)
-    context.decode_step_1based_buf.fill_(suffix_kv_len)
     pool = session.pools[0]
     for dst, src in ((pool.unshared_key, suffix_key), (pool.unshared_value, suffix_value)):
         dst[0].copy_(src.reshape(rows, suffix_kv_len, num_kv_heads, head_size).transpose(1, 2))
@@ -170,7 +170,6 @@ class MockCommonAttentionMetadata:
 def build_beam_attn_metadata(
     inputs: BeamAttnInputs,
     device: torch.device | str,
-    npu_causal_atten_mask: torch.Tensor | None = None,
 ) -> Any:
     req_ids = [f"req_{i}" for i in range(inputs.num_reqs)]
     beam_data = {
@@ -199,9 +198,7 @@ def build_beam_attn_metadata(
         builder.num_heads_q = inputs.query.shape[1]
         builder.num_kv_heads = inputs.num_kv_heads
         builder._is_cuda = builder.device.type == "cuda"
-        builder._is_npu = builder.device.type == "npu"
         builder._fixed_buffers = False
-        builder.npu_causal_atten_mask = npu_causal_atten_mask
         return builder.build(0, MockCommonAttentionMetadata(inputs, device))
     finally:
         BEAM_DATA_VAR.reset(token)
@@ -212,17 +209,14 @@ def run_cascade_beam_attention(
     device: torch.device | str,
     vllm_flash_attn_version: int,
     logits_soft_cap: float | None = None,
-    npu_causal_atten_mask: torch.Tensor | None = None,
     *,
     metadata: Any = None,
 ) -> torch.Tensor:
-    """Exercise the platform's incremental cascade (including on xllm installations)."""
-    if torch.device(device).type == "npu":
-        from vllm_gr.v1.attention.backends import beam_attn_npu as backend
-    else:
-        from vllm_gr.v1.attention.backends import beam_attn_gpu as backend
+    """Exercise CUDA incremental cascade attention."""
+    from vllm_gr.v1.attention.backends import beam_attn_gpu as backend
+
     if metadata is None:
-        metadata = build_beam_attn_metadata(inputs, device, npu_causal_atten_mask)
+        metadata = build_beam_attn_metadata(inputs, device)
     output = torch.empty_like(inputs.query)
     backend.cascade_attention(
         output=output,

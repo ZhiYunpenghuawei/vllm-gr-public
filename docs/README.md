@@ -66,11 +66,11 @@ extension of vLLM.
 
 ## Getting started
 
-Install vLLM-GR on a [CUDA GPU or Ascend NPU](getting_started/installation/README.md),
+Install vLLM-GR on a [CUDA GPU](getting_started/installation/README.md),
 then run the [OneRec quickstart](getting_started/quickstart.md) to generate
-your first ranked candidates. Both device paths require upstream vLLM 0.30.0.
+your first ranked candidates. The built-in CUDA path requires upstream vLLM 0.30.0.
 
-The first release includes CUDA and Ascend inference and
+GR includes CUDA inference and
 [experimental gRPC serving](serving/grpc.md). See the
 [feature matrix](user_guide/feature_compatibility.md) for device-specific limits.
 
@@ -81,7 +81,7 @@ The first release includes CUDA and Ascend inference and
 | Install and run a model for the first time | [Getting started](getting_started/README.md) |
 | Send a request over HTTP or gRPC | [Serving APIs](serving/README.md) |
 | Scale replicas, update a running service, or monitor it | [Deployment and operations](user_guide/README.md#deployment-and-operations) |
-| Check which Beam features work on CUDA or Ascend | [Features and compatibility](user_guide/feature_compatibility.md) |
+| Check which Beam features work on a supported platform | [Features and compatibility](user_guide/feature_compatibility.md) |
 | Run an offline or online example | [Examples](examples/README.md) |
 | Configure Beam search or a constraint table | [Configuration](configuration/README.md) |
 | Look up a command | [CLI reference](cli/README.md) |

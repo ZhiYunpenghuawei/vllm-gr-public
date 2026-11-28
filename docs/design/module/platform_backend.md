@@ -14,7 +14,7 @@ class name of a compatible GR implementation. Only the winner is imported.
 
 | External matches | Built-in matches | Result |
 | --- | --- | --- |
-| One | Any | Use the external platform, including on CUDA and Ascend. |
+| One | Any | Use the matching external platform, including on CUDA. |
 | Two or more | Any | Report an ambiguity with the matching plugin names. |
 | Zero | One | Use the matching built-in class. |
 | Zero | Two or more | Report an ambiguity. |
@@ -29,9 +29,10 @@ forked processes resolve their own instance.
 | Built-in class | Required native identity | GR Runner |
 | --- | --- | --- |
 | [CudaGRPlatform](../../../vllm_gr/platforms/cuda/platform.py) | Platform enum `CUDA` and device type `cuda` | CUDA V1 or V2 |
-| [AscendGRPlatform](../../../vllm_gr/platforms/ascend/platform.py) | A `vllm_ascend.platform.NPUPlatform` or subclass with device type `npu` | Ascend V1 |
 
-ROCm also uses `cuda` for tensor placement. A vendor using the native
+CUDA is the only built-in platform. The legacy Ascend implementation is retired;
+other native identities require a matching external plugin. ROCm also uses
+`cuda` for tensor placement. A vendor using the native
 out-of-tree platform enum can distinguish its hardware by the qualified
 class lineage. Each winner declares its native platform type, checked before instantiation.
 [Identity](../../../vllm_gr/platforms/identity.py), [built-in table](../../../vllm_gr/platforms/table.py)
@@ -81,11 +82,12 @@ for the execution modes it implements.
 
 Beam Attention is selected by the platform seam: the plugin installs the
 selected GR platform as the process `current_platform`, and
-`GRPlatform.get_attn_backend_cls` returns the imported Beam backend class
-for engines whose GR configuration selects it, delegating every other
+`GRPlatform.get_attn_backend_cls` returns the dotted Beam backend class path
+for engines whose GR configuration selects it. vLLM imports that class,
+and the platform delegates every other
 selection to the native platform through the MRO. The shared
-`AttentionBackendEnum.CUSTOM` registry slot is never claimed (vendor
-runtimes may squat it at import time), `attention_config` keeps the value
+`AttentionBackendEnum.CUSTOM` registry slot is never claimed (it may already belong to a different
+runtime plugin), `attention_config` keeps the value
 the vendor runtime left it, and nothing is registered or installed at
 engine construction.
 [Platform seam](../../../vllm_gr/platforms/interface.py)

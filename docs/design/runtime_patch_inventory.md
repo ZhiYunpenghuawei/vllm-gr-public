@@ -33,16 +33,6 @@ conditions).
 
 Risk: `high`; process roles: `main`, `engine_core`, `worker`
 
-### GR-PATCH-002 — NPUWorker Initialization Hook
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/v1/worker/npu/startup_patch.py`
-
-Installer: `vllm_gr.v1.worker.npu.startup_patch.patch_npu_worker_init_device`
-
-Risk: `high`; process roles: `worker`
-
 ### GR-PATCH-003 — FlatLogprobs Fast Append Override
 
 Scope: `core`; backend ID: `null`
@@ -135,18 +125,6 @@ Risk: `critical`; process roles: `gpu_worker`
 
 Planned GPU runners bind their admitted stage implementation at model load. GR control frames require this binding. Deferred samples and execute failures belong to that runner generation. The CUDA stage owns Decode graph capture.
 
-### GR-PATCH-012 — NPU ModelRunner Override
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/v1/worker/npu/npu_model_runner_patch.py, vllm_gr/v1/worker/npu/stage_projection.py`
-
-Installer: `vllm_gr.v1.worker.model_runner_patch.apply_worker_patches`
-
-Risk: `critical`; process roles: `npu_worker`
-
-Planned Ascend runners bind the V1 stage implementation at model load. The native runner keeps ownership of its pending NPU stage and retirement state.
-
 ### GR-PATCH-015 — Sliced Vocabulary Projection
 
 Scope: `core`; backend ID: `null`
@@ -157,46 +135,6 @@ Installer: `vllm_gr.v1.worker.sliced_logits_patch.apply_sliced_logits_patch`
 
 Risk: `medium`; process roles: `worker`
 
-### GR-PATCH-016 — NPU-aware Spawn Start Method
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/platforms/ascend/spawn_patch.py`
-
-Installer: `vllm_gr.platforms.ascend.spawn_patch.apply_npu_spawn_patch`
-
-Risk: `medium`; process roles: `main`, `engine_core`
-
-### GR-PATCH-018 — Ascend Penalties Warmup OOM Guard
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/v1/worker/npu/startup_patch.py`
-
-Installer: `vllm_gr.v1.worker.npu.startup_patch.apply_penalties_warmup_oom_guard`
-
-Risk: `medium`; process roles: `npu_worker`
-
-### GR-PATCH-019 — Ascend additional_config Sanitizer
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/platforms/ascend/config_patch.py`
-
-Installer: `vllm_gr.platforms.ascend.config_patch.apply_engine_core_config_sanitizer and install_ascend_config_filter`
-
-Risk: `high`; process roles: `main`, `engine_core`, `worker`
-
-### GR-PATCH-021 — Contiguous Beam Prefix KV
-
-Scope: `backend`; backend ID: `ascend`
-
-Owner: `vllm_gr/v1/worker/npu/kv_layout_patch.py`
-
-Installer: `vllm_gr.v1.worker.npu.kv_layout_patch.apply_npu_contiguous_kv_cache_patch`
-
-Risk: `high`; process roles: `npu_worker`
-
 ## Retired patches
 
 Retired IDs stay in the YAML inventory for traceability. They have no active
@@ -204,6 +142,14 @@ installer and no entry in the checked list above.
 
 | ID | Historical target | Why it was removed |
 | --- | --- | --- |
+| `GR-PATCH-001` | `vllm_ascend.platform.NPUPlatform.get_attn_backend_cls` | The unified GRPlatform attention selection seam replaces the vendor attention bridge. |
+| `GR-PATCH-002` | `vllm_ascend.worker.worker.NPUWorker.init_device` | Legacy Ascend Worker initialization patch removed with the built-in backend. |
+| `GR-PATCH-012` | `NPUModelRunner V1 and NPUWorker runtime lifecycle hooks` | Legacy Ascend runner, graph and stage-projection integration removed. |
+| `GR-PATCH-013` | `vllm.v1.attention.backends.registry.AttentionBackendEnum.CUSTOM` | The unified GRPlatform attention selection seam returns the Beam backend without claiming the shared registry slot. |
+| `GR-PATCH-016` | `vllm.utils.system_utils._maybe_force_spawn` | Ascend-specific spawn compatibility patch removed with the built-in backend. |
+| `GR-PATCH-018` | `vllm_ascend.model_executor.warmup.kernel_warmup.penalties_triton_warmup` | Legacy Ascend penalties warmup guard removed. |
+| `GR-PATCH-019` | `EngineCoreProc.run_engine_core and vllm_ascend.ascend_config.init_ascend_config` | Legacy Ascend config filter and entrypoint sanitizer removed. |
+| `GR-PATCH-021` | `vllm_ascend.attention.utils.requires_contiguous_pa_kv_cache` | Legacy Ascend contiguous prefix KV policy patch removed. |
 | `GR-PATCH-006` | `OpenAIServingModels.__init__` | Legacy Catalog serving patch and its tests were removed; canonical V1 constraints load in the worker |
 | `GR-PATCH-014` | `LMCache RequestTracker, ReqMeta, and LMCacheConnectorV1Impl` | Experimental LMCache integration removed; no supported version pin or vLLM 0.30 validation |
 | `GR-PATCH-017` | `NPUWorker.profile_memory in vllm_ascend.worker.worker or vllm_ascend.worker.worker_v1` | Removal condition met by the 0.30 upgrade; vllm-ascend 0.30.0rc2 replaced profile_memory with log_memory_stats, which reads the two allocator counters directly, and the installer found no native method to wrap on that runtime |

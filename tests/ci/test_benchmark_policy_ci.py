@@ -64,16 +64,9 @@ def run_policy(
     step = next(item for item in job["steps"] if item.get("id") == "benchmark-policy")
     output = output_dir / "output"
     summary = output_dir / "summary"
-    # Stub only hardware detection. Execute the workflow's actual Python CLI.
+    # Execute the workflow's actual Python CLI under the test interpreter.
     script = """
-command() { [[ "$*" == "-v npu-smi" && "$TEST_DEVICE" == "npu" ]]; }
-python() {
-  if [[ "$*" == *"import acl"* ]]; then
-    printf '%s\n' "$TEST_BOARD"
-  else
-    "$TEST_PYTHON" "$@"
-  fi
-}
+python() { "$TEST_PYTHON" "$@"; }
 """ + step["run"]
     result = subprocess.run(
         ["bash", "-eu", "-o", "pipefail", "-c", script],
@@ -106,7 +99,6 @@ def read_output(output: Path) -> dict[str, str]:
     "device,board,ttft",
     [
         ("gpu", "unknown", "300"),
-        ("npu", "Ascend910_9362", "280"),
     ],
 )
 def test_policy_job_emits_every_consumer_field(

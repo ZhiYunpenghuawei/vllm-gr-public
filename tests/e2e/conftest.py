@@ -3,7 +3,7 @@
 """Default the system tests to the GPU tier.
 
 These suites usually drive a real engine. A test that declares any tier itself
-keeps it, so NPU suites and host-side helper cases (``cpu_test``) are not
+keeps it, so host-side helper cases (``cpu_test``) are not
 relabelled.
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 # Any declared tier wins, including an explicit cpu_test for host-side cases.
-_TIER_MARKERS = ("cpu_test", "gpu_test", "npu_test")
+_TIER_MARKERS = ("cpu_test", "gpu_test")
 _DIRECTORY = Path(__file__).resolve().parent
 
 

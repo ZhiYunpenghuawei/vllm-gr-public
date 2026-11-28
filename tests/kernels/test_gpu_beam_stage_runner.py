@@ -37,7 +37,7 @@ from vllm_gr.v1.beam.dispatch import (
     GR_WORKER_RESULT_ATTR,
     GRDeviceStateRef,
 )
-from vllm_gr.v1.worker import gr_context as _gr_context
+from vllm_gr.v1.worker.cuda import gr_context as _gr_context
 from vllm_gr.v1.worker.cuda.beam_search_runner import BeamSearchRunner
 from vllm_gr.v1.worker.cuda.gpu_beam_stage_runner import (
     LOCAL_TILE_SIZE,

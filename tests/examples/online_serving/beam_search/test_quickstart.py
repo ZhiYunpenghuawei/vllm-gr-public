@@ -186,7 +186,7 @@ def test_http_quickstart_verifies_results(
 
 @pytest.mark.parametrize(  # type: ignore[misc]
     ("backend", "override", "runner"),
-    [("cuda", None, "1"), ("cuda", "0", "0"), ("npu", "1", "0")],
+    [("cuda", None, "1"), ("cuda", "0", "0")],
 )
 def test_http_quickstart_selects_runner(
     backend: str, override: str | None, runner: str, workdir: Path, monkeypatch: pytest.MonkeyPatch

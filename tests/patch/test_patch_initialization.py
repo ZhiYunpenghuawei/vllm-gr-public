@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from importlib import import_module
 from unittest import mock
 
@@ -71,40 +70,25 @@ def test_flat_logprobs_patch_preserves_offsets_and_optional_columns(
     assert flat.decoded_tokens == ["b", "c", None]
 
 
-def test_runtime_patch_order_preserves_ascend_initialization(
+def test_runtime_patch_order_preserves_platform_initialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vllm_gr.patch as runtime_patch
-    from tests.helpers.ascend_platform import AscendGRPlatform
     from vllm_gr.platforms import table
-    from vllm_gr.platforms.ascend import spawn_patch
-    from vllm_gr.v1.worker.npu import startup_patch
 
-    monkeypatch.setattr(table, "current_gr_platform", AscendGRPlatform)
     call_order: list[str] = []
 
-    def apply_npu_spawn() -> int:
-        call_order.append("npu_spawn")
-        return 1
-
-    def patch_npu_worker() -> int:
-        call_order.append("npu_worker")
-        return 1
+    def apply_platform(*, force: bool) -> int:
+        assert force
+        call_order.append("platform")
+        return 2
 
     def apply_beam() -> int:
         call_order.append("beam")
         return 1
 
-    monkeypatch.setattr(
-        spawn_patch,
-        "apply_npu_spawn_patch",
-        apply_npu_spawn,
-    )
-    monkeypatch.setattr(
-        startup_patch,
-        "patch_npu_worker_init_device",
-        patch_npu_worker,
-    )
+    integration = mock.Mock(apply_runtime_patches=apply_platform)
+    monkeypatch.setattr(table, "current_gr_platform", lambda: integration)
     monkeypatch.setattr(
         runtime_patch,
         "_apply_gr_beam_patches",
@@ -112,7 +96,7 @@ def test_runtime_patch_order_preserves_ascend_initialization(
     )
 
     assert runtime_patch._apply_patches(force=True) == 3
-    assert call_order == ["npu_spawn", "npu_worker", "beam"]
+    assert call_order == ["platform", "beam"]
 
 
 def test_optional_patch_count_tracks_actual_installation(
@@ -276,6 +260,8 @@ def test_plugin_exposes_simple_per_patch_status(
     integration = mock.Mock()
     monkeypatch.setattr(startup, "configure_model_runner_default", mock.Mock())
     monkeypatch.setattr(table, "current_gr_platform", mock.Mock(return_value=integration))
+    install_platform = mock.Mock(return_value=True)
+    monkeypatch.setattr(plugin, "install_gr_platform", install_platform)
     reapply = mock.Mock(return_value=1)
     monkeypatch.setattr(runtime_patch, "re_apply_patches", reapply)
     monkeypatch.setattr(
@@ -286,11 +272,13 @@ def test_plugin_exposes_simple_per_patch_status(
 
     state = plugin.initialize_runtime()
 
+    install_platform.assert_called_once_with(integration)
     integration.check_environment.assert_called_once_with()
     reapply.assert_called_once_with(integration=integration)
     assert state == {
         "patch_count": 1,
         "patches": {"flat_logprobs": "applied"},
+        "platform_seam": True,
     }
 
 
@@ -754,65 +742,6 @@ def test_chain_miss_traffic_bypasses_per_block_memo() -> None:
         kv_cache_utils.hash_block_tokens = orig_hash
         kv_cache_utils.get_request_block_hasher = orig_factory
         _vllm_engine.core.get_request_block_hasher = orig_core_factory
-
-
-def test_npu_spawn_patch_wraps_upstream_force_spawn_and_both_bindings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import vllm.utils.system_utils as system_utils
-    import vllm.v1.executor.multiproc_executor as multiproc_executor
-
-    from vllm_gr.platforms.ascend import spawn_patch
-
-    upstream_calls: list[str] = []
-
-    def upstream() -> None:
-        upstream_calls.append("upstream")
-
-    monkeypatch.setattr(system_utils, "_maybe_force_spawn", upstream)
-    monkeypatch.setattr(multiproc_executor, "_maybe_force_spawn", upstream)
-
-    assert spawn_patch.apply_npu_spawn_patch() is True
-    wrapped = system_utils._maybe_force_spawn
-    assert multiproc_executor._maybe_force_spawn is wrapped
-    assert hasattr(wrapped, "_vllm_gr_npu_spawn_original")
-
-    monkeypatch.setattr(spawn_patch, "_npu_is_initialized", lambda: False)
-    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
-    wrapped()
-    assert upstream_calls == ["upstream"]
-    assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
-
-    # Re-applying over the wrapped target must not stack another layer.
-    assert spawn_patch.apply_npu_spawn_patch() is False
-    assert system_utils._maybe_force_spawn is wrapped
-
-    # A later native import can restore the directly imported executor alias.
-    monkeypatch.setattr(multiproc_executor, "_maybe_force_spawn", upstream)
-    assert spawn_patch.apply_npu_spawn_patch() is True
-    assert system_utils._maybe_force_spawn is wrapped
-    assert multiproc_executor._maybe_force_spawn is wrapped
-    assert spawn_patch.apply_npu_spawn_patch() is False
-
-
-def test_npu_spawn_patch_forces_spawn_only_when_npu_initialized(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from vllm_gr.platforms.ascend import spawn_patch
-
-    monkeypatch.setattr(spawn_patch, "_npu_is_initialized", lambda: True)
-    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
-    spawn_patch._force_spawn_if_npu_initialized()
-    assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
-
-    # An explicit spawn choice or an uninitialized NPU leaves the env alone.
-    spawn_patch._force_spawn_if_npu_initialized()
-    assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
-
-    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
-    monkeypatch.setattr(spawn_patch, "_npu_is_initialized", lambda: False)
-    spawn_patch._force_spawn_if_npu_initialized()
-    assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
 
 
 @pytest.mark.parametrize(

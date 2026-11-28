@@ -21,7 +21,7 @@ from vllm_gr.v1.attention.backends import beam_attn, beam_attn_gpu
 
 @pytest.fixture
 def flash_backend(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    # These tests exercise policy selection without loading CUDA extensions on NPU.
+    # These tests exercise policy selection without loading CUDA extensions.
     flash = ModuleType("vllm.vllm_flash_attn.flash_attn_interface")
     monkeypatch.setattr(flash, "is_fa_version_supported", lambda version: True, raising=False)
     monkeypatch.setattr(
@@ -55,8 +55,10 @@ def test_prefill_config_roundtrip(version: Any, short_suffix: bool) -> None:
 
 @pytest.mark.parametrize("version", [True, False, 0, 4, 3.0, "3", "fast", [], {}])
 def test_prefill_config_rejects_invalid_version(version: Any) -> None:
+    from vllm_gr.platforms.cuda.config import validate_prefill_flash_attn_version
+
     with pytest.raises(ValueError, match="prefill_flash_attn_version"):
-        GRConfig(prefill_flash_attn_version=version)
+        validate_prefill_flash_attn_version(version)
 
 
 def _resolve(requested: Any, decode: int = 2, **changes: Any) -> int:
@@ -130,9 +132,7 @@ def test_forward_routes_both_prefill_entries_without_changing_decode(
         cascade_attention=lambda **kwargs: calls.append(kwargs),
         prefill_attention=lambda **kwargs: calls.append(kwargs),
     )
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", False)
-    monkeypatch.setattr(beam_attn, "_get_platform_execution_module", lambda: execution)
+    monkeypatch.setattr(beam_attn, "_get_cuda_execution_module", lambda: execution)
     impl = _impl()
     q = torch.zeros(4, 2, 8)
     key_cache = torch.zeros(2, 16, 2, 8)
@@ -248,10 +248,8 @@ def test_initialization_preserves_global_decode_config(
         },
     )
     monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: config)
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", False)
     monkeypatch.setattr(beam_attn.envs, "VLLM_BATCH_INVARIANT", False)
-    monkeypatch.setattr(beam_attn, "_get_platform_execution_module", lambda: beam_attn_gpu)
+    monkeypatch.setattr(beam_attn, "_get_cuda_execution_module", lambda: beam_attn_gpu)
     monkeypatch.setattr(beam_attn_gpu, "get_flash_attn_version", lambda **kwargs: decode_version)
     impl = beam_attn.BeamAttentionImpl(16, 128, 128**-0.5, 8, None, None, "auto")
     assert impl.prefill_flash_attn_version == (
@@ -272,29 +270,6 @@ def test_omitted_prefill_policy_defaults_to_auto() -> None:
     mapping = gr_config_to_mapping(canonical)
     assert mapping["gr"]["prefill_flash_attn_version"] == "auto"
     assert gr_config_from_mapping(mapping).prefill_flash_attn_version == "auto"
-
-
-@pytest.mark.parametrize("policy", [None, "auto"])
-def test_npu_prefill_default_and_inherit_are_noops(
-    monkeypatch: pytest.MonkeyPatch, policy: Any
-) -> None:
-    import vllm.config
-
-    config = SimpleNamespace(
-        additional_config={"vllm_gr": {"gr": {"prefill_flash_attn_version": policy}}}
-    )
-    monkeypatch.setattr(vllm.config, "get_current_vllm_config_or_none", lambda: config)
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", False)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", True)
-    execution = SimpleNamespace(get_flash_attn_version=lambda **kw: None)
-    monkeypatch.setattr(beam_attn, "_get_platform_execution_module", lambda: execution)
-    monkeypatch.setattr(
-        beam_attn_gpu,
-        "resolve_prefill_flash_attn_version",
-        lambda *args, **kw: pytest.fail("NPU must not resolve CUDA FA"),
-    )
-    impl = beam_attn.BeamAttentionImpl(16, 128, 128**-0.5, 8, None, None, "auto")
-    assert impl.prefill_flash_attn_version is None
 
 
 pytestmark = pytest.mark.cpu_test

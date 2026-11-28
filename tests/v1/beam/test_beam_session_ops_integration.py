@@ -238,10 +238,10 @@ def test_beam_search_group_outputs_feed_session_step_complete(
 
 
 def test_ops_select_unshared_kv_reorders_pool() -> None:
-    """Test ops.select_unshared_kv (NPU-style) with pool tensors.
+    """Test the public prefix-count KV selection with pool tensors.
 
     Note: ops.select_unshared_kv requires cache_beam == beam_size,
-    so we use max_beams == beam_width. The NPU-style select uses
+    so we use max_beams == beam_width. The public select uses
     group_token_num to derive parent indices, not beam_index directly.
     """
     beam_size = 3

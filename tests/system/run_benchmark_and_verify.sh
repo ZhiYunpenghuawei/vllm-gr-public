@@ -80,19 +80,14 @@ elapsed_time_offline_th="$ELAPSED_TIME_OFFLINE_THRESHOLD"
 p99_ttft_th="$P99_TTFT_THRESHOLD"
 p99_tpot_th="$P99_TPOT_THRESHOLD"
 
-# Constraint Tables are available on both CUDA and NPU.  Exercise that worker
-# path whenever the resolved policy or local hardware is an accelerator;
-# leaving CUDA on the Trie catalog would let this system test pass without
-# covering the CUDA constrained-top-k kernels it is meant to protect.
+# Exercise the CUDA Constraint Table path on all benchmark runs.
 #
 # The triples document follows the video_catalog.json generation flow: CI
 # pre-generates it in the "Build catalog" step (tools/constraints/build_constraint_triples.py)
 # and passes TRIPLES_PATH, mirroring CATALOG_PATH.  When it is absent (local
 # runs) it is derived from the catalog location and built on demand.
 constraint_device=cuda
-if [[ "$device" == "npu" || "$device" == "gpu" || "$device" == "cuda" ]] \
-    || command -v npu-smi > /dev/null 2>&1 \
-    || nvidia-smi -L > /dev/null 2>&1; then
+if [[ "$device" == "gpu" || "$device" == "cuda" ]]; then
   triples_path="${TRIPLES_PATH:-$(dirname "$CATALOG_PATH")/video_constraint_triples.json}"
   if [[ ! -f "$triples_path" ]]; then
     echo "Building Constraint Tables triples: $triples_path"
@@ -107,9 +102,9 @@ if [[ "$device" == "npu" || "$device" == "gpu" || "$device" == "cuda" ]] \
   else
     echo "Using pre-built Constraint Tables triples: $triples_path"
   fi
-  if [[ "$device" == "npu" ]]; then
-    constraint_device=npu
-  fi
+else
+  echo "Unsupported benchmark device: $device" >&2
+  exit 1
 fi
 
 echo "Using model: $MODEL_PATH"
@@ -138,7 +133,7 @@ config_dir="$(cd "$config_dir" && pwd)"
 results_dir=$(mktemp -d "$config_dir/onerec-results.XXXXXX") || exit 1
 metrics_reader="$SCRIPT_DIR/../../tools/ci/read_benchmark_metrics.py"
 echo "OneRec metrics directory: $results_dir"
-gr_overrides=$(python - "$MODEL_PATH" "${triples_path:?Beam V1 requires CUDA or NPU constraint triples}" \
+gr_overrides=$(python - "$MODEL_PATH" "${triples_path:?Beam V1 requires CUDA constraint triples}" \
     "$config_dir/constraint_table.safetensors" "$constraint_device" "$beam_width" <<'PY_CONFIG'
 import json
 import sys

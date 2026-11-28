@@ -115,35 +115,26 @@ class TestLevelRunner(unittest.TestCase):
             "import pytest\n"
             "@pytest.mark.l1\n@pytest.mark.cpu_test\ndef test_cpu(): pass\n"
             "@pytest.mark.l1\n@pytest.mark.gpu_test\ndef test_gpu(): pass\n"
-            "@pytest.mark.l1\n@pytest.mark.npu_test\ndef test_npu(): pass\n"
-            "@pytest.mark.l1\n@pytest.mark.gpu_test\n@pytest.mark.npu_test\ndef test_both(): pass\n"
             "@pytest.mark.l1\n@pytest.mark.cpu_test\n@pytest.mark.gpu_test\ndef test_cpu_gpu(): pass\n"
             "@pytest.mark.l2\n@pytest.mark.cpu_test\ndef test_l2_cpu(): pass\n"
             "@pytest.mark.l2\n@pytest.mark.gpu_test\ndef test_l2_gpu(): pass\n"
-            "@pytest.mark.l2\n@pytest.mark.npu_test\ndef test_l2_npu(): pass\n"
             "@pytest.mark.l3\n@pytest.mark.cpu_test\ndef test_l3(): pass\n"
             "@pytest.mark.l3\n@pytest.mark.gpu_test\ndef test_l3_gpu(): pass\n"
-            "@pytest.mark.l3\n@pytest.mark.gpu_test\n@pytest.mark.npu_test\ndef test_l3_both(): pass\n"
             "@pytest.mark.l4\n@pytest.mark.gpu_test\ndef test_l4_gpu(): pass\n",
             encoding="utf-8",
         )
         expected = {
             ("l1", "cpu", False): {"test_cpu"},
-            ("l1", "cuda", False): {"test_cpu", "test_gpu", "test_both", "test_cpu_gpu"},
-            ("l1", "npu", False): {"test_cpu", "test_npu", "test_both"},
+            ("l1", "cuda", False): {"test_cpu", "test_gpu", "test_cpu_gpu"},
             ("pr-device", "cpu", False): {"test_l2_cpu"},
             ("pr-device", "cuda", False): {
                 "test_gpu",
-                "test_both",
                 "test_cpu_gpu",
                 "test_l2_cpu",
                 "test_l2_gpu",
             },
-            ("pr-device", "npu", False): {"test_npu", "test_both", "test_l2_cpu", "test_l2_npu"},
-            ("pr-device", "cuda", True): {"test_gpu", "test_both", "test_cpu_gpu", "test_l2_cpu"},
-            ("pr-device", "npu", True): {"test_npu", "test_both", "test_l2_cpu", "test_l2_npu"},
+            ("pr-device", "cuda", True): {"test_gpu", "test_cpu_gpu", "test_l2_cpu"},
             ("l3", "cuda", True): {"test_l3"},
-            ("l3", "npu", True): {"test_l3", "test_l3_both"},
             ("l4", "cuda", True): {"test_l4_gpu"},
         }
         for (level, device, exclude_gpu), names in expected.items():

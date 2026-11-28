@@ -49,13 +49,10 @@ from vllm_gr.constraints.table import (
     CONSTRAINT_TABLE_TENSOR_NAMES,
     MAX_CONSTRAINT_TABLE_BYTES,
 )
-from vllm_gr.ops.npu.rec_constrained_topk import MAX_TOP_K as MAX_TOP_K
-
-# ``MAX_TOP_K`` remains importable from this legacy module, but the NPU
-# operator boundary is its single source of truth.
 
 # Upper bound on the total device-table bytes a constraint resource may occupy.
 MAX_RESOURCE_BYTES = MAX_CONSTRAINT_TABLE_BYTES
+# Compatibility export; per-device candidate limits are enforced at runtime.
 
 
 class TrieArrays(NamedTuple):
@@ -187,8 +184,7 @@ def validate_resource_tables(resource: ConstraintTableResource) -> None:
         array = getattr(resource, name)
         if array.ndim != 1:
             raise ValueError(
-                f"table {name} must be 1-D (NPU ABI), got {array.ndim} dims "
-                f"with shape {tuple(array.shape)}"
+                f"table {name} must be 1-D, got {array.ndim} dims with shape {tuple(array.shape)}"
             )
         if array.dtype != want:
             raise ValueError(f"table {name}.dtype must be {want}, got {array.dtype}")

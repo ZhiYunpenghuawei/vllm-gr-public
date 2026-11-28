@@ -37,16 +37,13 @@ def _resolve_constraint_backend(config: GRConfig) -> GRConfig:
     if (
         config.constraint is None
         or config.constraint.table is None
-        or config.constraint.table.backend is not ConstraintBackendKind.AUTO
+        or config.constraint.table.backend
+        not in (ConstraintBackendKind.AUTO, ConstraintBackendKind.PLATFORM)
     ):
         return config
-    from vllm.platforms import current_platform
-
     from vllm_gr.platforms.config import current_constraint_backend
 
-    return resolve_constraint_backend(
-        config, current_constraint_backend(current_platform.device_type)
-    )
+    return resolve_constraint_backend(config, current_constraint_backend())
 
 
 def _beam_worker_decision_default(
@@ -101,8 +98,8 @@ def create_engine_config(self, usage_context=None, headless=False):
     service.apply_native_defaults(config)
     attention = getattr(config, "attention_config", None)
     backend = getattr(attention, "backend", None)
-    # Ascend resets the native selector to auto during VllmConfig creation.
-    # Preserve explicit CUSTOM intent so our worker selector can honor it.
+    # A native platform may reset the selector to auto during VllmConfig creation.
+    # Preserve explicit CUSTOM intent for its GR attention router.
     if (
         backend is None
         and isinstance(requested_backend_name, str)
@@ -131,8 +128,7 @@ def create_engine_config(self, usage_context=None, headless=False):
     # Beam attention is selected by the platform seam from the GR marker in
     # effective_gr_config: nothing is registered, installed, or restored at
     # engine construction, and attention_config keeps the value the vendor
-    # runtime left it (vllm-ascend clears an explicit backend during
-    # VllmConfig creation; CUDA configs keep theirs untouched).
+    # runtime left it.
     if effective_gr_config.beam_max_width is not None:
         from vllm_gr.config.execution import validate_gr_execution_config
 

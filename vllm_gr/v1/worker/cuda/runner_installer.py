@@ -86,9 +86,14 @@ def install() -> None:
 def install_worker_utilities() -> None:
     from vllm.v1.worker.gpu_worker import Worker
 
+    from vllm_gr.v1.worker.cuda.gr_context import get_beam_graph_runtime_stats
     from vllm_gr.v1.worker.model_runner_patch import install_worker_utility_hooks
 
     install_worker_utility_hooks(Worker)
+    if not getattr(Worker, "_vllm_gr_beam_graph_stats_hook_installed", False):
+        # The graph diagnostics describe native CUDA runner state.
+        Worker.get_gr_beam_graph_runtime_stats = get_beam_graph_runtime_stats  # type: ignore[attr-defined]
+        setattr(Worker, "_vllm_gr_beam_graph_stats_hook_installed", True)
 
 
 def install_worker_hooks() -> None:

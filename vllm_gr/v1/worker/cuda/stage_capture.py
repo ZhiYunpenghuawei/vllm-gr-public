@@ -47,12 +47,6 @@ def capture_cuda_v1_forward(
         from vllm_gr.v1.worker.gr_context import _get_gr_config
 
         cfg = _get_gr_config(worker)
-        if getattr(cfg, "beam_graph_widths", None) is not None:
-            logger.warning(
-                "beam.graph_widths is NPU-only startup pre-capture; CUDA captures "
-                "dynamic Decode (batch, width) shapes lazily on first use."
-            )
-
         max_reqs = worker.vllm_config.scheduler_config.max_num_seqs
         batches = tuple(b for b in cfg.deployment.beam_batch_sizes if b <= max_reqs)
         if not batches:

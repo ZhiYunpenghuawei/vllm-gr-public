@@ -109,7 +109,7 @@ def _exercise_http_beam_extension_parameters(chat: bool, explicit_k: bool) -> No
 def test_chat_http_handles_replaced_usage_info(
     sampling_patch: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Ascend replaces UsageInfo and rebuilds the Chat response after collection.
+    # Native plugins may rebuild response models after collection.
     replacement_usage_info = type("ReplacementUsageInfo", (engine_protocol.UsageInfo,), {})
 
     field = ChatCompletionResponse.model_fields["usage"]

@@ -20,7 +20,6 @@ from vllm_gr.config.models import (
     DeploymentOptions,
     GRAttentionBackend,
     GRConfig,
-    NPUDecodeExecution,
     absolute_config_path,
 )
 from vllm_gr.config.schema import config_default, config_fields
@@ -97,18 +96,18 @@ def validate_constraint_table_enabled(value: object) -> bool:
 
 def validate_constraint_table_backend(
     value: object,
-) -> ConstraintBackendKind:
+) -> ConstraintBackendKind | str:
     if isinstance(value, ConstraintBackendKind):
         return value
-    if not isinstance(value, str):
-        raise ValueError("vllm-gr constraint_table.backend must be a string")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("vllm-gr constraint_table.backend must be a nonempty string")
+    backend_id = value.lower()
     try:
-        return ConstraintBackendKind(value.lower())
-    except ValueError as exc:
-        supported = ", ".join(backend.value for backend in ConstraintBackendKind)
-        raise ValueError(
-            f"unsupported vllm-gr constraint_table.backend {value!r}; supported: {supported}"
-        ) from exc
+        return ConstraintBackendKind(backend_id)
+    except ValueError:
+        # Concrete backend IDs are admitted by the selected platform, not by
+        # a fixed registry of devices in the shared configuration package.
+        return backend_id
 
 
 def validate_constraint_table_path(value: object) -> str | None:
@@ -177,39 +176,17 @@ def validate_attention_backend(value: object) -> GRAttentionBackend | None:
         ) from exc
 
 
-def validate_npu_decode_execution(value: object) -> NPUDecodeExecution | None:
-    if value is None:
-        return None
-    if isinstance(value, NPUDecodeExecution):
-        return value
-    if not isinstance(value, str):
-        raise ValueError("vllm-gr npu_decode_execution must be a string")
-    try:
-        return NPUDecodeExecution(value.lower())
-    except ValueError as exc:
-        supported = ", ".join(mode.value for mode in NPUDecodeExecution)
-        raise ValueError(
-            f"unsupported vllm-gr npu_decode_execution {value!r}; supported: {supported}"
-        ) from exc
-
-
 def validate_prefill_flash_attn_version(value: object) -> int | str | None:
-    if value is None or (isinstance(value, str) and value == "auto"):
+    if value is None or (isinstance(value, str) and value):
         return value
-    if type(value) is int and value in (2, 3):
+    if type(value) is int and value > 0:
         return value
-    raise ValueError("beam.prefill_flash_attn_version must be null, 'auto', 2 or 3")
+    raise ValueError("beam.prefill_flash_attn_version must be null, a string or a positive integer")
 
 
 def validate_enable_short_suffix_attention(value: object) -> bool:
     if not isinstance(value, bool):
         raise TypeError("beam.enable_short_suffix_attention must be a boolean")
-    return value
-
-
-def validate_beam_sid_stage_vocab(value: object) -> bool:
-    if not isinstance(value, bool):
-        raise TypeError("beam.sid_stage_vocab must be a boolean")
     return value
 
 
@@ -227,15 +204,6 @@ def validate_beam_graph_enabled(value: object) -> bool:
     raise ValueError("vllm-gr beam_graph_enabled must be a boolean")
 
 
-def validate_beam_graph_batch_size(value: object) -> int:
-    """Validate the exact logical batch shape captured for Beam graph replay."""
-
-    batch_size = _validate_positive_int(value, "beam_graph_batch_size")
-    if batch_size > 128:
-        raise ValueError(f"vllm-gr beam_graph_batch_size must be <= 128, got {batch_size}")
-    return batch_size
-
-
 def _validate_positive_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"vllm-gr {name} must be an integer")
@@ -251,18 +219,6 @@ def validate_beam_max_width(value: object) -> int | None:
     if width > MAX_BEAM_WIDTH:
         raise ValueError(f"vllm-gr beam_max_width must be <= {MAX_BEAM_WIDTH}, got {width}")
     return width
-
-
-def validate_beam_graph_widths(value: object) -> tuple[int, ...] | None:
-    """Normalize explicit NPU Decode widths to prewarm at startup."""
-    if value is None:
-        return None
-    if not isinstance(value, (list, tuple)) or not value:
-        raise ValueError("beam.graph_widths must be a nonempty list of integers or null")
-    widths = tuple(validate_beam_width(width) for width in value)
-    if len(set(widths)) != len(widths):
-        raise ValueError("beam.graph_widths must not contain duplicates")
-    return tuple(sorted(widths))
 
 
 def validate_beam_width(value: object) -> int:

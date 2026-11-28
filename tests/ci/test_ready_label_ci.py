@@ -676,7 +676,7 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
                 self.run_gate(dict.fromkeys(gate["needs"], "skipped"), event).returncode, 1
             )
 
-    def test_recall_and_decode_benchmark_cover_both_target_branches_and_devices(self) -> None:
+    def test_recall_and_decode_benchmark_cover_both_target_branches(self) -> None:
         steps = self.workflows["ci.yml"]["jobs"]["decode-benchmark"]["steps"]
         by_name = {step.get("name"): step for step in steps}
         recall_steps = (
@@ -686,7 +686,7 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
             "Upload Beam V1 Recall measurements",
         )
         for branch in ("main", "decode_graph", "feature"):
-            for device in ("gpu", "npu"):
+            for device in ("gpu",):
                 for event in ("pull_request", "workflow_dispatch"):
                     with self.subTest(branch=branch, device=device, event=event):
                         github = context(event=event, base_ref=branch)
@@ -764,7 +764,9 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
     def test_level_workflow_schedule_and_resource_safety(self) -> None:
         workflow = yaml.safe_load((ROOT / ".github/workflows/test-levels.yml").read_text())
         triggers = workflow.get("on", workflow.get(True))
-        self.assertEqual(triggers["push"]["branches"], ["main"])
+        # Push L3 CUDA and CPU coverage remains in the Buildkite merge
+        # pipeline; the previous GitHub push lane was Ascend-only.
+        self.assertNotIn("push", triggers)
         self.assertNotIn("pull_request", triggers)  # PR levels run in the existing gate.
         self.assertEqual(
             [item["cron"] for item in triggers["schedule"]],
@@ -789,10 +791,10 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
 
         job = workflow["jobs"]["level"]
         self.assertEqual(job["runs-on"], "self-hosted")
+        self.assertEqual(job["strategy"]["matrix"]["device"], ["gpu"])
         expression = job["env"]["TEST_LEVEL"].strip().removeprefix("${{").removesuffix("}}")
         expression = expression.replace("&&", " and ").replace("||", " or ")
         for event, schedule, chosen, expected in (
-            ("push", "", "", "l3"),
             ("schedule", "0 18 * * *", "", "l4"),
             ("schedule", "0 19 * * 0", "", "l5"),
             ("workflow_dispatch", "", "l2", "l2"),
@@ -824,7 +826,7 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
         self.assertIn("VLLM_GR_TARGET_DEVICE == 'cuda'", steps["Run full OneRec recall gate"]["if"])
 
     @pytest.mark.l1  # type: ignore[misc]
-    def test_level_workflow_skips_npu_before_setup(self) -> None:
+    def test_level_workflow_reports_unsupported_runner_before_setup(self) -> None:
         workflow = yaml.safe_load((ROOT / ".github/workflows/test-levels.yml").read_text())
         steps = workflow["jobs"]["level"]["steps"]
         detect = steps[0]
@@ -917,7 +919,7 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
         self.assertLess(names.index("Set up virtual environment"), names.index(install["name"]))
         self.assertLess(names.index(install["name"]), names.index("Refresh editable installation"))
         for hit in ("true", "false"):
-            for device in ("cuda", "npu"):
+            for device in ("cuda",):
                 with self.subTest(cache_hit=hit, device=device):
                     commands = []
                     for step in (create, install):
@@ -945,13 +947,7 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
                             commands.extend(result.stdout.splitlines())
                     expected = []
                     if hit == "false":
-                        expected.append(
-                            "venv --seed --system-site-packages .venv"
-                            if device == "npu"
-                            else "venv --seed .venv"
-                        )
-                        if device == "cuda":
-                            expected.append("pip install vllm==test")
+                        expected.extend(["venv --seed .venv", "pip install vllm==test"])
                     self.assertEqual(commands, expected)
 
 
@@ -959,14 +955,10 @@ new AsyncFunction('github', 'context', 'core', fixture.script)(github, context, 
 @pytest.mark.parametrize(  # type: ignore[misc]
     "devices,lane,expected,exit_code",
     [
-        ((), "gpu", None, 1),
-        ((), "npu", None, 1),
+        ((), "gpu", "false", 0),
         (("npu-smi",), "gpu", "false", 0),
-        (("npu-smi",), "npu", "true", 0),
         (("nvidia-smi",), "gpu", "true", 0),
-        (("nvidia-smi",), "npu", "false", 0),
-        (("npu-smi", "nvidia-smi"), "gpu", "false", 0),
-        (("npu-smi", "nvidia-smi"), "npu", "true", 0),
+        (("npu-smi", "nvidia-smi"), "gpu", "true", 0),
     ],
 )
 def test_level_workflow_detects_accelerator(
@@ -977,7 +969,7 @@ def test_level_workflow_detects_accelerator(
     result = run_accelerator_detection(tmp_path, devices, lane)
     assert result.returncode == exit_code, result.stderr
     if expected is None:
-        assert "No supported GPU or NPU" in result.stderr
+        assert "No supported CUDA GPU" in result.stderr
     else:
         assert f"run={expected}" in (tmp_path / "output").read_text()
         if expected == "false":
@@ -994,8 +986,12 @@ def test_accelerator_detection_ignores_shell_startup(
     monkeypatch.setenv("BASH_ENV", str(startup))
     monkeypatch.setenv("BASH_FUNC_command%%", "() { return 0; }")
     result = run_accelerator_detection(tmp_path, (), "gpu")
-    assert result.returncode == 1
-    assert "No supported GPU or NPU" in result.stderr
+    # With only the CUDA lane remaining, a non-CUDA runner reports that the
+    # level was not run and skips setup. A leaked shell function could make
+    # command -v incorrectly identify this runner as CUDA.
+    assert result.returncode == 0
+    assert "run=false" in (tmp_path / "output").read_text()
+    assert "not run" in (tmp_path / "summary").read_text()
     assert "unexpected-shell-startup" not in result.stderr
 
 

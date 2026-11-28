@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +21,6 @@ from vllm_gr.config import (
     ConstraintMode,
     GRAttentionBackend,
     GRConfig,
-    NPUDecodeExecution,
     gr_config_to_mapping,
     resolve_candidate_width,
 )
@@ -53,24 +51,6 @@ def test_empty_vllm_config_uses_defaults() -> None:
 
 def test_none_vllm_config_uses_defaults() -> None:
     assert GRConfig.from_vllm_config(None) == GRConfig()
-
-
-def test_npu_decode_execution_defaults_to_unset() -> None:
-    # Unset (None): the runtime resolves per platform (xllm on NPU with the
-    # operator library, cascade otherwise).
-    assert GRConfig().npu_decode_execution is None
-    assert GRConfig.from_vllm_config(_vllm_config()).npu_decode_execution is None
-    # Unset is not an explicit GR configuration; explicit cascade is.
-    assert GRConfig().enabled is False
-    assert GRConfig(npu_decode_execution=NPUDecodeExecution.CASCADE).enabled is True
-
-
-@pytest.mark.parametrize("value", [1, True, [], {}, "flash"])  # type: ignore[misc]
-def test_rejects_invalid_npu_decode_execution(value: object) -> None:
-    with pytest.raises(ValueError, match="npu_decode_execution"):
-        GRConfig.from_vllm_config(
-            _vllm_config({"vllm_gr": {"gr": {"npu_decode_execution": value}}})
-        )
 
 
 @pytest.mark.parametrize("value", [1, True, [], "FLASH_ATTN"])  # type: ignore[misc]
@@ -261,39 +241,8 @@ def test_explicit_candidate_width_may_differ_from_the_beam_width(candidate_width
     assert resolve_candidate_width(config) == candidate_width
 
 
-@pytest.mark.parametrize("widths", [tuple(range(1, 8)), (*range(1, 8), 128)])  # type: ignore[misc]
-def test_beam_graph_capture_limit_counts_implicit_capacity_once(
-    widths: tuple[int, ...],
-) -> None:
-    config = GRConfig(beam_max_width=128, beam_graph_widths=widths)
-    assert config.beam_graph_active
-    assert config.beam_graph_widths == widths
-
-
-@pytest.mark.parametrize("widths", [tuple(range(1, 9)), (*range(1, 9), 128)])  # type: ignore[misc]
-def test_beam_graph_capture_limit_rejects_more_than_eight_effective_widths(
-    widths: tuple[int, ...],
-) -> None:
-    with pytest.raises(ValueError, match="at most 8 captured widths including max_width"):
-        GRConfig(beam_max_width=128, beam_graph_widths=widths)
-
-
-def test_beam_graph_capture_limit_preserves_default_and_disabled_graphs() -> None:
-    assert GRConfig().beam_graph_widths is None
-    default = GRConfig(beam_max_width=128)
-    assert default.beam_graph_widths is None
-    assert default.beam_graph_active
-    disabled = GRConfig(
-        beam_graph_enabled=False,
-        beam_max_width=128,
-        beam_graph_widths=tuple(range(1, 129)),
-    )
-    assert not disabled.beam_graph_active
-    assert disabled.beam_graph_widths == tuple(range(1, 129))
-
-
-def test_npu_beam_without_catalog_stays_unconstrained(tmp_path: Path) -> None:
-    """A catalog-free NPU deployment uses full-vocabulary generation."""
+def test_cuda_beam_without_catalog_stays_unconstrained(tmp_path: Path) -> None:
+    """A catalog-free CUDA deployment uses full-vocabulary generation."""
     from vllm_gr.engine.arg_utils_gr import create_engine_config
 
     vllm_config = _vllm_config()
@@ -304,7 +253,7 @@ def test_npu_beam_without_catalog_stays_unconstrained(tmp_path: Path) -> None:
         ),
         mock.patch(
             "vllm_gr.engine.arg_utils_gr.engine_config_service",
-            return_value=platform_config_service("npu"),
+            return_value=platform_config_service("cuda"),
         ),
     ):
         result = create_engine_config(
@@ -340,7 +289,7 @@ def test_cuda_beam_enables_worker_decision_by_default(tmp_path: Path) -> None:
     assert config.beam_worker_decision is True
 
 
-@pytest.mark.parametrize("platform", ["cpu", "cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("platform", ["cpu", "cuda"])  # type: ignore[misc]
 @pytest.mark.parametrize("worker_decision", [None, False, True])  # type: ignore[misc]
 def test_engine_config_preserves_explicit_decision_controls(
     tmp_path: Path,
@@ -373,27 +322,6 @@ def test_engine_config_preserves_explicit_decision_controls(
 
 
 pytestmark = pytest.mark.cpu_test
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("execution", list(NPUDecodeExecution))  # type: ignore[misc]
-def test_engine_config_merge_keeps_npu_execution_choice(
-    tmp_path: Path, execution: str | None
-) -> None:
-    from vllm_gr.config.parser import load_gr_config
-
-    path = tmp_path / "scenario.yaml"
-    path.write_text(
-        json.dumps(
-            gr_config_to_mapping(GRConfig(npu_decode_execution=execution, beam_graph_batch_size=4))
-        )
-    )
-    result = load_gr_config(
-        path, overrides={"beam_width": [32, 32, 32], "candidate_width": [32, 32, 32]}
-    )
-    assert result.npu_decode_execution is execution
-    assert result.beam_graph_batch_size == 4
-    assert result.beam_max_width == 32
 
 
 @pytest.fixture(autouse=True)  # type: ignore[misc]

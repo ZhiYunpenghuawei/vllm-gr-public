@@ -1,18 +1,22 @@
 # Installation
 
 Install vLLM-GR from a source checkout. Choose the guide for the accelerator
-and vendor runtime you will use.
+you will use.
 
 ## Supported hardware
 
 | Device | Guide |
 | --- | --- |
 | NVIDIA GPU (CUDA) | [CUDA installation](gpu.md) |
-| Ascend NPU | [Ascend installation](npu.md) |
+
+CPU packages provide host and packaging checks, not a built-in CPU inference
+backend. Other devices require an independently installed
+[GR platform plugin](../../design/module/platform_backend.md). The legacy
+built-in Ascend backend is no longer included.
 
 ## Shared steps
 
-Both guides assume a checkout of this repository:
+The CUDA guide assumes a checkout of this repository:
 
 ```bash
 git clone https://github.com/JiusiServe/vllm-gr.git
@@ -21,7 +25,7 @@ cd vllm-gr
 
 !!! important "Select the installation target"
 
-    Set `VLLM_GR_TARGET_DEVICE` to `cuda` or `npu`. When the variable is unset,
+    Set `VLLM_GR_TARGET_DEVICE` to `cuda` for CUDA or `cpu` for host checks. When the variable is unset,
     `setup.py` tries to detect the Torch backend. An isolated build may have no
     Torch installation, in which case the build defaults to CUDA.
 

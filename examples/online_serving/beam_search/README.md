@@ -5,14 +5,12 @@ Run one verified request against a temporary local server, or
 
 ## Prepare the environment and inputs
 
-Install the [CUDA runtime](../../../docs/getting_started/installation/gpu.md) or
-[Ascend runtime](../../../docs/getting_started/installation/npu.md). Set `ONEREC_MODEL` to a
+Install the [CUDA runtime](../../../docs/getting_started/installation/gpu.md). Set `ONEREC_MODEL` to a
 [local OneRec snapshot with its tokenizer](../../README.md#run-onerec-offline).
 Run the commands below from the repository root on Linux with Python, Bash
 and curl 7.76 or later.
 Apply the [vLLM CLI dispatch patch](../../../docs/cli/README.md#enable-gr-dispatch).
-Check the installed runtime with `vllm check-env --gr` on CUDA or
-`vllm check-env --gr --npu` on Ascend.
+Check the installed runtime with `vllm check-env --gr`.
 
 ## Run one request
 
@@ -20,7 +18,7 @@ Check the installed runtime with `vllm check-env --gr` on CUDA or
 python examples/online_serving/beam_search/quickstart.py --model "$ONEREC_MODEL"
 ```
 
-On Ascend, append `--constraint-backend npu`. The quickstart builds a
+The quickstart builds a
 Constraint Table from the [two-SID sample](../catalog/sample_catalog.json),
 starts `vllm serve` on a loopback port, and sends `Recommend the next video.`
 at its natural length. It requests width 128 with three SID components.
@@ -86,14 +84,10 @@ client flags configure the request. Library defaults can differ.
 
 CUDA defaults to ModelRunner V2. See
 [ModelRunner selection](../../README.md#choose-a-modelrunner) to override it.
-The command forces ModelRunner V1 on Ascend.
 
 ```bash
 export ONEREC_SERVED_MODEL_NAME=onerec
 onerec_runner="${VLLM_USE_V2_MODEL_RUNNER:-1}"
-if [ "$ONEREC_BACKEND" = npu ]; then
-  onerec_runner=0
-fi
 VLLM_USE_V2_MODEL_RUNNER="$onerec_runner" vllm serve "$ONEREC_MODEL" --gr \
   --host 127.0.0.1 --port 8000 \
   --served-model-name "$ONEREC_SERVED_MODEL_NAME" \

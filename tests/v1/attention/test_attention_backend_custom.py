@@ -57,8 +57,7 @@ class TestCustomAttentionBackendMarker(unittest.TestCase):
 
         The Beam intent travels in the GR configuration marker; the platform
         seam resolves it from there. attention_config keeps whatever the
-        vendor runtime left (vllm-ascend clears the explicit backend during
-        VllmConfig creation), so nothing is restored at engine construction.
+        native runtime left, so nothing is restored at engine construction.
         """
         from vllm_gr.engine.arg_utils_gr import create_engine_config
 
@@ -148,49 +147,15 @@ class TestCustomBackendMarkerSerialization(unittest.TestCase):
         assert parse_gr_config(restored).attention_backend is GRAttentionBackend.CUSTOM
 
 
-class TestNpuDefaultBlockSize(unittest.TestCase):
-    """Guard the vLLM 16 / vLLM-Ascend 128 default mismatch."""
-
-    @staticmethod
-    def _config(*, user_specified=False, is_hybrid=False):
-        return SimpleNamespace(
-            cache_config=SimpleNamespace(
-                block_size=16,
-                user_specified_block_size=user_specified,
-            ),
-            model_config=SimpleNamespace(is_hybrid=is_hybrid),
-        )
-
-    def test_npu_uses_128_when_block_size_was_not_explicit(self):
-        from vllm_gr.platforms.ascend.config import AscendConfigService
-
-        config = self._config()
-        AscendConfigService().apply_native_defaults(config)
-
-        assert config.cache_config.block_size == 128
-
-    def test_npu_preserves_explicit_block_size(self):
-        from vllm_gr.platforms.ascend.config import AscendConfigService
-
-        config = self._config(user_specified=True)
-        AscendConfigService().apply_native_defaults(config)
-
-        assert config.cache_config.block_size == 16
-
-    def test_npu_preserves_hybrid_model_block_size(self):
-        from vllm_gr.platforms.ascend.config import AscendConfigService
-
-        config = self._config(is_hybrid=True)
-        AscendConfigService().apply_native_defaults(config)
-
-        assert config.cache_config.block_size == 16
-
+class TestCudaDefaultBlockSize(unittest.TestCase):
     def test_gpu_keeps_vllm_default(self):
         from vllm_gr.platforms.cuda.config import CudaConfigService
 
-        config = self._config()
+        config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=16, user_specified_block_size=False),
+            model_config=SimpleNamespace(is_hybrid=False),
+        )
         CudaConfigService().apply_native_defaults(config)
-
         assert config.cache_config.block_size == 16
 
 
@@ -205,9 +170,7 @@ class TestBeamAttentionVllmApiContract(unittest.TestCase):
 
         execution = SimpleNamespace(is_available=lambda: True)
         with (
-            mock.patch.object(beam_attn, "CUDA_DEVICE", True),
-            mock.patch.object(beam_attn, "NPU_DEVICE", False),
-            mock.patch.object(beam_attn, "_get_platform_execution_module", return_value=execution),
+            mock.patch.object(beam_attn, "_get_cuda_execution_module", return_value=execution),
         ):
             reasons = beam_attn.BeamAttentionBackend.validate_configuration(
                 head_size=128,
@@ -240,11 +203,11 @@ class TestBeamAttentionVllmApiContract(unittest.TestCase):
         with mock.patch.object(selector_patch, "_gr_attention_is_custom", return_value=True):
             assert (
                 CudaGRPlatform.get_attn_backend_cls(None, object())
-                == selector_patch._BEAM_BACKEND_PATH
+                == "vllm_gr.v1.attention.backends.beam_attn.BeamAttentionBackend"
             )
 
-    def test_backend_pins_ascend_kv_cache_shape(self):
-        """vLLM 0.30 dropped the base-class method; the NPU runner calls it."""
+    def test_backend_pins_kv_cache_shape(self):
+        """The layout helper preserves the token/head axis ordering."""
         from vllm import envs as vllm_envs
 
         from vllm_gr.v1.attention.backends import beam_attn
@@ -256,7 +219,7 @@ class TestBeamAttentionVllmApiContract(unittest.TestCase):
         # Default (unset) and the token-major NHD view.
         assert shape_for(None) == (2, 8, 128, 2, 64)
         assert shape_for("NHD") == (2, 8, 128, 2, 64)
-        # Head-major layouts switch the block/head axes, matching vllm-ascend.
+        # Head-major layouts switch the block/head axes.
         assert shape_for("HND") == (2, 8, 2, 128, 64)
         assert shape_for("LBHNC") == (2, 8, 2, 128, 64)
 

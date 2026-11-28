@@ -86,7 +86,7 @@ class PolicyWorkerExtension:
         import torch
 
         from vllm_gr.v1.worker import model_runner_patch
-        from vllm_gr.v1.worker.gr_context import (
+        from vllm_gr.v1.worker.cuda.gr_context import (
             get_beam_graph_runtime_stats,
         )
 

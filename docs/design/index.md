@@ -15,17 +15,15 @@ settings and supported combinations, see
 ### Requests and scheduling
 
 - [Beam batch execution](feature/beam_batch_execution.md) defines what a frontend submits, what EngineCore admits and what the caller receives.
-- [Asynchronous scheduling](feature/async_scheduling.md) explains batch ownership, native request reservation and the CUDA and Ascend stage handoff.
+- [Asynchronous scheduling](feature/async_scheduling.md) explains batch ownership, native request reservation and the platform stage handoff.
 
 ### Prefill execution
 
 - [CUDA Prefill graph capture](feature/cuda_prefill_graph.md) covers token buckets in both model runners, padded replay and the fresh-prompt requirement for dense attention.
-- [Ascend BSND Prefill graphs](feature/npu_prefill_bsnd.md) describes how complete prompts fit into fixed per-request regions and when the worker falls back.
 
 ### Decode attention
 
 - [CUDA Beam Decode attention](feature/cuda_decode_attention.md) follows the shared prompt pages and per-beam suffix KV through attention and the final merge.
-- [Ascend Beam Decode execution](feature/npu_decode_execution.md) covers xllm and cascade selection, parent KV reordering and caller-owned XAttention output.
 
 ### Online updates
 

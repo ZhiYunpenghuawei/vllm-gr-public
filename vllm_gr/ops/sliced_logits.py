@@ -29,14 +29,6 @@ class SlicedLMHeadProxy(nn.Module):
         self.num_embeddings_per_partition = sliced_num_embeddings
         self.org_vocab_size = sliced_num_embeddings
         self.tp_size = 1
-        # AscendLogitsProcessor routes by the source head's layout enum. Reuse
-        # that enum's replicated value: this proxy owns its entire slice and
-        # performs no vocabulary-parallel communication. Reading the existing
-        # head avoids importing an unselected vendor runtime at module import.
-        parallel_mode = getattr(original_lm_head, "parallel_mode", None)
-        replicated_mode = getattr(type(parallel_mode), "REPLICATED", None)
-        if replicated_mode is not None:
-            self.parallel_mode = replicated_mode
 
 
 def get_rank_vocab_bounds(lm_head: Any) -> Tuple[int, int]:

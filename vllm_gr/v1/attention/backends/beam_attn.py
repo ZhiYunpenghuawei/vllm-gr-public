@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 # Adapted from https://github.com/vllm-project/vllm
 
-"""Beam attention over a shared paged prefix and persistent per-beam suffix KV."""
+"""CUDA Beam attention over a shared paged prefix and persistent per-beam suffix KV."""
 
 from functools import cached_property
 from typing import Any, ClassVar
@@ -23,8 +23,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-from vllm_gr.platforms.errors import UnsupportedBackendError
-from vllm_gr.platforms.table import current_gr_platform
 from vllm_gr.v1.attention.backends.beam_attn_metadata import (
     BeamAttentionMetadata,
     BeamAttentionMetadataBuilder,
@@ -42,18 +40,12 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
-try:
-    _layout = current_gr_platform().beam_attention_layout
-except UnsupportedBackendError:
-    _layout = None
-CUDA_DEVICE = _layout == "cuda"
-NPU_DEVICE = _layout == "ascend"
 
 
-def _get_platform_execution_module() -> Any:
-    from vllm_gr.platforms.table import current_gr_platform
+def _get_cuda_execution_module() -> Any:
+    from vllm_gr.v1.attention.backends import beam_attn_gpu
 
-    return current_gr_platform().get_attention_execution()
+    return beam_attn_gpu
 
 
 def _resolve_dense_prefill_mode() -> str | None:
@@ -65,7 +57,7 @@ def _resolve_dense_prefill_mode() -> str | None:
     still checks its CPU lengths (eager batches and non-Beam decode rows also
     reach the Prefill entry).
     """
-    if not CUDA_DEVICE or envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT:
         # The paged path pins num_splits=1; cuDNN-vs-FA2 selection by request
         # count would make results depend on batch composition.
         return None
@@ -101,7 +93,7 @@ class BeamAttentionImpl(AttentionImpl):
     @cached_property
     def execution(self) -> Any:
         """Bootstrap implementation until this layer's runner publishes its binding."""
-        return _get_platform_execution_module()
+        return _get_cuda_execution_module()
 
     def bind_gr_attention_execution(self, execution: Any) -> None:
         self.execution = execution
@@ -143,33 +135,6 @@ class BeamAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         return key_cache, value_cache
 
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config=None,
-        num_dcp_pcp_tokens=None,
-        draft_attn_metadatas=None,
-    ):
-        """Refresh ordinary FIA tasks; Beam uses persistent device buffers.
-
-        Beam decode refreshes persistent fixed-address device buffers before
-        replay. NPU prefill updates its native attention task groups directly
-        in ``NPUPrefillGraphRunner`` and does not use this shared hook.
-        """
-        if NPU_DEVICE and not CUDA_DEVICE:
-            from vllm_gr.v1.beam import BEAM_DATA_VAR
-
-            info = BEAM_DATA_VAR.get()
-            if not isinstance(info, dict) or info.get("beam_session") is None:
-                from vllm_gr.v1.attention.backends.npu_standard_graph import (
-                    update_standard_graph_params,
-                )
-
-                update_standard_graph_params(update_stream, forward_context, num_tokens)
-
     def __init__(
         self,
         num_heads: int,
@@ -184,21 +149,6 @@ class BeamAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
-        if NPU_DEVICE and not CUDA_DEVICE:
-            unsupported = []
-            if sliding_window is not None:
-                unsupported.append("sliding_window")
-            if alibi_slopes is not None:
-                unsupported.append("alibi_slopes")
-            if logits_soft_cap not in (None, 0.0):
-                unsupported.append("logits_soft_cap")
-            if unsupported:
-                raise NotImplementedError(
-                    "NPU CUSTOM Beam Attention does not support "
-                    + ", ".join(unsupported)
-                    + "; neither the cascade nor xllm execution path implements these settings."
-                )
-
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -226,11 +176,9 @@ class BeamAttentionImpl(AttentionImpl):
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
         )
-        self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT if CUDA_DEVICE else False
+        self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            if NPU_DEVICE:
-                raise NotImplementedError("BeamAttention does not support fp8 kv-cache on NPU.")
             if not BeamAttentionBackend.supports_kv_cache_dtype(self.kv_cache_dtype):
                 raise NotImplementedError(
                     "BeamAttention does not support fp8 kv-cache on this device."
@@ -238,8 +186,6 @@ class BeamAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            if NPU_DEVICE:
-                raise NotImplementedError("Sinks are not yet supported on NPU.")
             assert platform_execution.supports_sinks(), (
                 "Sinks are only supported in FlashAttention 3"
             )
@@ -252,9 +198,7 @@ class BeamAttentionImpl(AttentionImpl):
 
         config = GRConfig.from_vllm_config(get_current_vllm_config_or_none())
         short_suffix_attention = (
-            CUDA_DEVICE
-            and config.beam_max_width is not None
-            and config.enable_short_suffix_attention
+            config.beam_max_width is not None and config.enable_short_suffix_attention
         )
         if short_suffix_attention:
             from vllm_gr.v1.attention.backends.beam_attn_gpu import (
@@ -279,9 +223,7 @@ class BeamAttentionImpl(AttentionImpl):
         # Separate prefill from the version that defines decode prefix/LSE
         # semantics. Resolve before capture; never change the global config.
         self.prefill_flash_attn_version = self.vllm_flash_attn_version
-        if not CUDA_DEVICE and config.prefill_flash_attn_version not in (None, "auto"):
-            raise ValueError("beam.prefill_flash_attn_version is CUDA-only")
-        if CUDA_DEVICE and config.prefill_flash_attn_version is not None:
+        if config.prefill_flash_attn_version is not None:
             from vllm_gr.v1.attention.backends.beam_attn_gpu import (
                 resolve_prefill_flash_attn_version,
             )
@@ -308,7 +250,7 @@ class BeamAttentionImpl(AttentionImpl):
 
     def _prefill_cascade_kwargs(self) -> dict[str, int]:
         version = self.prefill_flash_attn_version
-        if CUDA_DEVICE and version is not None and version != self.vllm_flash_attn_version:
+        if version is not None and version != self.vllm_flash_attn_version:
             return {"prefill_flash_attn_version": version}
         return {}
 
@@ -325,8 +267,7 @@ class BeamAttentionImpl(AttentionImpl):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        if CUDA_DEVICE:
-            assert self.vllm_flash_attn_version is not None, "FlashAttention version not detected."
+        assert self.vllm_flash_attn_version is not None, "FlashAttention version not detected."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -382,17 +323,8 @@ class BeamAttentionImpl(AttentionImpl):
             if attn_metadata.prefix_indices is not None:
                 # Beam tokens at prefix_indices positions (always set on the
                 # incremental decode path, mixed or pure batch alike).
-                select_rows = (
-                    getattr(platform_execution, "select_beam_rows", None)
-                    if key.device.type == "npu"
-                    else None
-                )
-                if select_rows is not None:
-                    beam_key = select_rows(key, attn_metadata)
-                    beam_value = select_rows(value, attn_metadata)
-                else:
-                    beam_key = key[attn_metadata.prefix_indices]  # [W, H, D]
-                    beam_value = value[attn_metadata.prefix_indices]  # [W, H, D]
+                beam_key = key[attn_metadata.prefix_indices]  # [W, H, D]
+                beam_value = value[attn_metadata.prefix_indices]  # [W, H, D]
             else:
                 # Fallback kept for callers that do not set prefix_indices;
                 # the incremental path always sets it (see beam_attn_metadata).
@@ -417,10 +349,7 @@ class BeamAttentionImpl(AttentionImpl):
                     active_mask=getattr(attn_metadata, "beam_active_mask", None),
                 )
             else:
-                # Non-CUDA (NPU xllm/cascade, CPU unit tests) dispatches through
-                # the platform module. Cascade uses the shared pool writer.
-                # xLLM needs the session's fixed-address device buffers for
-                # ACL graph capture/replay.
+                # Delegate non-CUDA or eager cache writes to the executor.
                 platform_execution.cache_unshared_kv(
                     pool.unshared_key,
                     pool.unshared_value,
@@ -459,12 +388,8 @@ class BeamAttentionImpl(AttentionImpl):
 
         # --- Standard path (non-beam or prefill) ---
         if self.kv_sharing_target_layer_name is None and key is not None and value is not None:
-            if NPU_DEVICE:
-                k_scale = None
-                v_scale = None
-            else:
-                k_scale = layer._k_scale
-                v_scale = layer._v_scale
+            k_scale = layer._k_scale
+            v_scale = layer._v_scale
             platform_execution.reshape_and_cache(
                 key,
                 value,
@@ -513,44 +438,11 @@ class BeamAttentionImpl(AttentionImpl):
         """Streamlined fast-path for pure prefill execution in Full Graph mode."""
         platform_execution = self.execution
 
-        # Validate the captured layout before submitting even the cache write.
-        # A BSND dummy has no block table and cannot fall through to paged TND.
-        use_bsnd = NPU_DEVICE and getattr(attn_metadata, "prefill_fia_layout", "TND") == "BSND"
-        if use_bsnd:
-            batch_size = attn_metadata.num_reqs
-            lengths = attn_metadata.seq_lens_cpu
-            tokens = query.shape[0]
-            if (
-                batch_size <= 0
-                or tokens <= 0
-                or tokens % batch_size
-                or lengths is None
-                or len(lengths) != batch_size
-                or any(length != tokens // batch_size for length in lengths)
-            ):
-                raise ValueError(
-                    "BSND prefill requires fixed [P]*B metadata; cannot fall back to TND"
-                )
-            if key is None or value is None or self.kv_sharing_target_layer_name is not None:
-                raise ValueError("BSND prefill requires this layer's key/value without KV sharing")
-            if key.shape[0] != tokens or value.shape[0] != tokens:
-                raise ValueError("BSND prefill Q/K/V token counts must match")
-            if not attn_metadata.causal or attn_metadata.npu_causal_atten_mask is None:
-                raise ValueError("BSND padded prefill requires the static causal mask")
-            if (
-                self.sliding_window not in (None, (-1, -1))
-                or self.logits_soft_cap
-                or self.sinks is not None
-                or self.alibi_slopes is not None
-                or self.kv_cache_dtype.startswith("fp8")
-            ):
-                raise ValueError("BSND prefill does not support this attention configuration")
-
         key_cache, value_cache = self._kv_cache_views(kv_cache)
 
         if self.kv_sharing_target_layer_name is None and key is not None and value is not None:
-            k_scale = None if NPU_DEVICE else getattr(layer, "_k_scale", None)
-            v_scale = None if NPU_DEVICE else getattr(layer, "_v_scale", None)
+            k_scale = getattr(layer, "_k_scale", None)
+            v_scale = getattr(layer, "_v_scale", None)
             platform_execution.reshape_and_cache(
                 key,
                 value,
@@ -567,53 +459,9 @@ class BeamAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
 
-        # Both warmup and capture use current-layer K/V; replay runs this graph.
-        if use_bsnd:
-            platform_execution.prefill_attention_bsnd(
-                output=output,
-                query=query,
-                key=key,
-                value=value,
-                attn_metadata=attn_metadata,
-                scale=self.scale,
-            )
-            return output
-
         sliding_window_size = list(self.sliding_window) if self.sliding_window is not None else None
 
-        capture_state = getattr(platform_execution, "_GRAPH_CAPTURE_STATE", None)
-        if NPU_DEVICE and not CUDA_DEVICE and capture_state is not None:
-            from vllm.config import CUDAGraphMode
-            from vllm.forward_context import get_forward_context
-
-            from vllm_gr.v1.beam import BEAM_DATA_VAR
-
-            context = get_forward_context()
-            beam_info = BEAM_DATA_VAR.get()
-            if (
-                context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-                and context.capturing
-                and not capture_state["capturing"]
-                and (not isinstance(beam_info, dict) or beam_info.get("beam_session") is None)
-            ):
-                from vllm_gr.v1.attention.backends.npu_standard_graph import (
-                    capture_standard_fia,
-                )
-
-                capture_standard_fia(
-                    output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    attn_metadata,
-                    self.scale,
-                    layer.layer_name,
-                    context.model_instance.vllm_config.model_config.max_model_len,
-                )
-                return output
-
-        # Dense Prefill is CUDA-only; NPU never resolves the helper.
-        dense_kwargs = _dense_prefill_kwargs(self, key, value) if CUDA_DEVICE else {}
+        dense_kwargs = _dense_prefill_kwargs(self, key, value)
         platform_execution.prefill_attention(
             output=output,
             query=query,
@@ -642,11 +490,7 @@ class BeamAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        # Preserve the Ascend-compatible block size that
-        # the Ascend config service applies to the running config (128).
-        # vLLM 0.30's platform hook otherwise resolves an unspecified size back
-        # to a 16-multiple geometry that the Ascend kernels and prefix-caching
-        # block tables cannot represent.
+        # Respect an explicitly configured supported block size.
         from vllm.config.vllm import get_current_vllm_config_or_none
 
         current = get_current_vllm_config_or_none()
@@ -662,12 +506,7 @@ class BeamAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        # vLLM 0.30 dropped this from the base class; vllm-ascend's NPU runner
-        # calls it on the selected backend to size the pooled K/V cache, so the
-        # shape must match what the Ascend kernels and this module's gather
-        # helpers expect: a leading "2" that splits K from V, then a
-        # token-major block view. Mirror vllm-ascend's own layout switch so an
-        # explicit VLLM_KV_CACHE_LAYOUT=LBHNC/HND stays consistent with it.
+        # Preserve the public layout helper for callers constructing KV views.
         from vllm import envs as vllm_envs
 
         if vllm_envs.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
@@ -684,7 +523,7 @@ class BeamAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        return CUDA_DEVICE
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["BeamAttentionImpl"]:
@@ -720,11 +559,7 @@ class BeamAttentionBackend(AttentionBackend):
         if kv_cache_dtype is None:
             return True
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if NPU_DEVICE:
-                return False  # fp8 kv-cache not yet supported on NPU
-            if not CUDA_DEVICE:
-                return False
-            platform_execution = _get_platform_execution_module()
+            platform_execution = _get_cuda_execution_module()
             return (
                 platform_execution.get_flash_attn_version() == 3
                 and current_platform.is_device_capability_family(90)
@@ -733,18 +568,11 @@ class BeamAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        if NPU_DEVICE:
-            return False  # sinks not yet supported on NPU
-        if not CUDA_DEVICE:
-            return False
-        platform_execution = _get_platform_execution_module()
+        platform_execution = _get_cuda_execution_module()
         return platform_execution.is_available() and platform_execution.supports_sinks()
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # NPU does not use CUDA-style compute capability; accept it.
-        if NPU_DEVICE:
-            return True
         return capability >= DeviceCapability(8, 0)
 
     @classmethod
@@ -760,22 +588,19 @@ class BeamAttentionBackend(AttentionBackend):
         use_mm_prefix,
         device_capability,
     ) -> str | None:
-        if not NPU_DEVICE:
-            if not CUDA_DEVICE:
-                return "No FlashAttention varlen support."
-            if not _get_platform_execution_module().is_available():
-                return "No FlashAttention varlen support."
+        if not _get_cuda_execution_module().is_available():
+            return "No FlashAttention varlen support."
         if dtype not in cls.supported_dtypes:
             return f"Unsupported dtype {dtype}."
         if not cls.supports_head_size(head_size):
             return f"Unsupported head_size={head_size}."
-        if not NPU_DEVICE and not cls.supports_kv_cache_dtype(kv_cache_dtype):
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
             return f"Unsupported kv_cache_dtype={kv_cache_dtype}."
         if block_size is not None and block_size % 16 != 0:
             return f"block_size={block_size} not multiple of 16."
         if not cls.supports_compute_capability(device_capability):
             return "Requires GPU compute capability >= 8.0."
-        if not NPU_DEVICE and has_sink and not cls.supports_sink():
+        if has_sink and not cls.supports_sink():
             return "No FlashAttention sink support."
         if use_mla:
             return "No MLA support."

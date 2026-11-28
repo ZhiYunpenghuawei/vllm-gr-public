@@ -25,21 +25,14 @@ ROOT = REPO_ROOT
 
 
 class TestRuntimeResolution(unittest.TestCase):
-    def test_shipped_runtime_declarations_match_both_platforms(self) -> None:
+    def test_shipped_runtime_declarations_match_cuda(self) -> None:
         gr_version = runtime.package_version(ROOT, "0.30.0")
         self.assertEqual(
             runtime.declarations(ROOT, "cuda"),
             {"vllm": "0.30.0", "vllm-gr": gr_version},
         )
-        self.assertEqual(
-            runtime.declarations(ROOT, "npu"),
-            {
-                "vllm": "0.30.0",
-                "vllm-gr": gr_version,
-                "vllm-ascend": "0.30.0rc2",
-                "triton-ascend": "3.6.0",
-            },
-        )
+        with self.assertRaisesRegex(ValueError, "Unsupported CI runtime device"):
+            runtime.declarations(ROOT, "npu")
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -49,11 +42,7 @@ class TestRuntimeResolution(unittest.TestCase):
         files = {
             "setup.py": 'VLLM_GR_BASE_VERSION = "0.29.0"\n',
             "pyproject.toml": '[tool.setuptools_scm]\nfallback_version = "0.29.0"\n',
-            "vllm_gr/_env_check.py": (
-                '_SUPPORTED_VLLM_VERSION = "0.29.0"\n'
-                '_SUPPORTED_VLLM_ASCEND_VERSION = "0.29.0rc1"\n'
-                '_SUPPORTED_TRITON_ASCEND_VERSION = "3.2.1"\n'
-            ),
+            "vllm_gr/_env_check.py": ('_SUPPORTED_VLLM_VERSION = "0.29.0"\n'),
             "requirements/cuda.txt": "-r common.txt\nvllm==0.29.0\n",
             "requirements/common.txt": "numpy==2.2.6\n",
         }
@@ -164,7 +153,7 @@ class TestRuntimeResolution(unittest.TestCase):
         expected_dev = f"0.30.2.dev0+g{node}.dirty"
         self.assertEqual(runtime.resolve(worktree, "cuda")["expected"]["vllm-gr"], expected_dev)
         self.assertTrue(
-            runtime.check_versions({"vllm-gr": expected_dev}, {"vllm-gr": "0.30.2.dev0+g000.npu"})
+            runtime.check_versions({"vllm-gr": expected_dev}, {"vllm-gr": "0.30.2.dev0+g000.cpu"})
         )
 
     def test_future_candidate_drives_runtime_without_ci_pin_changes(self) -> None:
@@ -193,11 +182,11 @@ class TestRuntimeResolution(unittest.TestCase):
                     runtime.resolve(self.repo, "cuda")
                 path.write_text(original)
 
-    def test_annotated_guards_preserve_npu_declarations(self) -> None:
+    def test_annotated_guards_preserve_cuda_declarations(self) -> None:
         compat = self.repo / "vllm_gr/platforms/compat.py"
         compat.parent.mkdir()
         compat.write_text("# Provider range checks predate the pin move.\n")
-        expected = runtime.declarations(self.repo, "npu")
+        expected = runtime.declarations(self.repo, "cuda")
         path = self.repo / "vllm_gr/_env_check.py"
         original = path.read_text()
         for guard in runtime.GUARDS.values():
@@ -206,7 +195,7 @@ class TestRuntimeResolution(unittest.TestCase):
                 target = f"{name} = "
                 self.assertEqual(original.count(target), 1)
                 path.write_text(original.replace(target, f"{name}: str | None = "))
-                self.assertEqual(runtime.declarations(self.repo, "npu"), expected)
+                self.assertEqual(runtime.declarations(self.repo, "cuda"), expected)
         path.write_text(original)
 
     def test_source_tree_fallback_must_match_without_importing_version_module(self) -> None:
@@ -238,9 +227,7 @@ class TestRuntimeResolution(unittest.TestCase):
     def test_local_build_suffix_is_allowed_but_rc_is_not_stable(self) -> None:
         self.assertEqual(runtime.check_versions({"vllm": "0.30.0"}, {"vllm": "0.30.0+cu130"}), [])
         self.assertTrue(runtime.check_versions({"vllm": "0.30.0"}, {"vllm": "0.30.0rc2"}))
-        self.assertTrue(
-            runtime.check_versions({"vllm-ascend": "0.30.0rc2"}, {"vllm-ascend": "0.30.0"})
-        )
+        self.assertTrue(runtime.check_versions({"vllm": "0.30.0rc2"}, {"vllm": "0.30.0"}))
 
     def test_cache_isolated_by_python_architecture_and_dependencies(self) -> None:
         original = runtime.resolve(self.repo, "cuda")["cache_key"]
@@ -259,21 +246,11 @@ class TestRuntimeResolution(unittest.TestCase):
         self.assertEqual(spec["expected"], {"vllm": "0.29.0", "vllm-gr": "0.29.0"})
         self.assertEqual(spec, runtime.resolve(self.repo, "cuda"))
 
-    def test_npu_requires_and_fingerprints_vendor_image(self) -> None:
-        packages = {
-            "vllm": "0.29.0+npu",
-            "vllm-ascend": "0.29.0rc1",
-            "triton-ascend": "3.2.1",
-            "torch-npu": "2.11.0",
-        }
-        with patch.object(runtime, "inventory", return_value=packages):
-            npu = runtime.resolve(self.repo, "npu")
-            self.assertNotEqual(npu["cache_key"], runtime.resolve(self.repo, "cuda")["cache_key"])
-            packages["torch-npu"] = "2.11.0+vendor2"
-            self.assertNotEqual(npu["cache_key"], runtime.resolve(self.repo, "npu")["cache_key"])
-            packages.pop("triton-ascend")
-            with self.assertRaisesRegex(ValueError, "NPU runner image is not ready"):
+    def test_unsupported_device_fails_before_runtime_probe(self) -> None:
+        with patch.object(runtime, "inventory") as inventory:
+            with self.assertRaisesRegex(ValueError, "Unsupported CI runtime device"):
                 runtime.resolve(self.repo, "npu")
+            inventory.assert_not_called()
 
     def test_verify_rejects_wrong_runtime_before_import(self) -> None:
         spec = runtime.resolve(self.repo, "cuda")
@@ -349,17 +326,12 @@ class TestRuntimeResolution(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(json.loads(output.read_text())["ok"])
 
-    def test_missing_vendor_declaration_does_not_prevent_cuda_resolution(self) -> None:
-        path = self.repo / "vllm_gr/_env_check.py"
-        path.write_text(
-            path.read_text().replace(
-                '_SUPPORTED_TRITON_ASCEND_VERSION = "3.2.1"',
-                "",
-            )
-        )
+    def test_current_compat_guard_does_not_require_vendor_module(self) -> None:
+        compat = self.repo / "vllm_gr/platforms/compat.py"
+        compat.parent.mkdir()
+        compat.write_text('SUPPORTED_VLLM_VERSION = "0.29.0"\n')
+        (self.repo / "vllm_gr/_env_check.py").unlink()
         self.assertEqual(runtime.resolve(self.repo, "cuda")["expected"]["vllm"], "0.29.0")
-        with self.assertRaisesRegex(ValueError, "_SUPPORTED_TRITON_ASCEND_VERSION"):
-            runtime.resolve(self.repo, "npu")
 
 
 class TestRuntimeWorkflow(unittest.TestCase):

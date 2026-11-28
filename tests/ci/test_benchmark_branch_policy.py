@@ -54,7 +54,7 @@ class TestBenchmarkBranchPolicy(unittest.TestCase):
             workflow["env"]["POLICY_TARGET_BRANCH"],
             "${{ github.event.pull_request.base.ref || github.base_ref || github.ref_name }}",
         )
-        # Execute the workflow's actual selection logic with stubbed NPU probing.
+        # Execute the workflow's CUDA-only selection logic.
         # GPU selection must not require nvidia-smi or any model-specific probe.
         selection = step["run"].split("args=(", 1)[0]
         self.assertNotIn("nvidia-smi", selection)
@@ -72,13 +72,7 @@ printf '%s\\n' "$device" "$board_id"
         for branch, event, (device, hardware_board) in product(
             ("main", "decode_graph", "feature", ""),
             ("pull_request", "workflow_dispatch"),
-            (
-                ("gpu", "unknown"),
-                ("npu", "Ascend910_9362"),
-                ("npu", "Ascend_9362"),
-                ("npu", "OtherNPU"),
-                ("npu", "unknown"),
-            ),
+            (("gpu", "unknown"),),
         ):
             with self.subTest(
                 branch=branch, event=event, device=device, hardware_board=hardware_board
@@ -104,13 +98,11 @@ printf '%s\\n' "$device" "$board_id"
                 expected_board = hardware_board
                 if enabled:
                     expected_board = f"decode_graph_{device}"
-                    if device == "npu" and hardware_board == "Ascend910_9362":
-                        expected_board = "decode_graph_Ascend910_9362"
                 self.assertEqual(board, expected_board)
                 with patch.dict(os.environ, {"CHANGE_TARGET": branch}):
                     values = resolve_policy(policy, actual_device, board)
                     baseline = resolve_policy(policy, device, hardware_board)
-                expected = (0.05, 0.21, 0.03) if device == "npu" or enabled else (0.09, 0.29, 0.04)
+                expected = (0.05, 0.21, 0.03) if enabled else (0.09, 0.29, 0.04)
                 self.assertEqual(tuple(float(values[key]) for key in keys), expected)
                 self.assertEqual(values["ACCURACY_FAILURE_MODE"], "blocking")
                 # Preserve the existing performance settings for this device.

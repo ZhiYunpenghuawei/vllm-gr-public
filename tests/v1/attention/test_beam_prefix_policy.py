@@ -340,7 +340,7 @@ def test_broken_optional_backend_is_treated_as_unavailable(monkeypatch):
 
     import torch
 
-    # NPU images ship a vllm without the vllm_flash_attn package, so stub it
+    # Host tests may use vLLM without the vllm_flash_attn package, so stub it
     # instead of importing it; the probe only needs is_fa_version_supported.
     def fake_supported(version):
         if version == 4:

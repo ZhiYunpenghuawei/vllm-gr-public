@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from vllm_gr.config import (
-    ConstraintBackendKind,
     ConstraintConfig,
     ConstraintMode,
     ConstraintTableSpec,
@@ -50,7 +49,7 @@ def _vllm_config(
             mode=ConstraintMode.TABLE,
             table=ConstraintTableSpec(
                 max_top_k=max_top_k,
-                backend=ConstraintBackendKind.CUDA,
+                backend="cuda",
                 path="/models/constraint-table.safetensors",
                 artifact_digest=_ARTIFACT_DIGEST,
                 tokenizer_digest=_TOKENIZER_DIGEST,
@@ -366,15 +365,12 @@ def test_canonical_capacity_validation_happens_after_weights(
 
 
 def test_canonical_cuda_tp_falls_back_to_full_projection(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm.platforms import current_platform
-
-    if current_platform.device_type == "npu":
-        pytest.skip("CUDA vocabulary projection slicing is not used on Ascend NPU")
-
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
-    from vllm_gr.config import ConstraintBackendKind
+    from vllm_gr.v1.worker.cuda.constraint_projection import (
+        prepare_cuda_constraint_projection,
+    )
     from vllm_gr.v1.worker.sliced_logits_patch import apply_sliced_logits_patch
 
     apply_sliced_logits_patch()
@@ -382,7 +378,7 @@ def test_canonical_cuda_tp_falls_back_to_full_projection(monkeypatch: pytest.Mon
     runner.vllm_config.additional_config["vllm_gr"]["gr"]["constraint_table"]["backend"] = "cuda"
     runner.vllm_config.parallel_config = SimpleNamespace(tensor_parallel_size=2)
     backend = _Backend()
-    backend.info.backend = ConstraintBackendKind.CUDA
+    backend.info.backend = "cuda"
     backend.vocab_slice = (3, 5)
     monkeypatch.setattr(
         "vllm_gr.constraints.loader.load_constraint_backend", lambda **kwargs: backend
@@ -408,7 +404,12 @@ def test_canonical_cuda_tp_falls_back_to_full_projection(monkeypatch: pytest.Mon
     )
     hidden = torch.randn(2, 8)
     try:
-        assert make_load_model_with_constraint_backend(weights)(runner) == "loaded"
+        assert (
+            make_load_model_with_constraint_backend(
+                weights, prepare_backend=prepare_cuda_constraint_projection
+            )(runner)
+            == "loaded"
+        )
         assert runner.constraint_backend.get() is backend
         assert backend.vocab_slice is None
         assert runner.model[0]._gr_vocab_slice is None
@@ -421,23 +422,20 @@ def test_canonical_cuda_tp_falls_back_to_full_projection(monkeypatch: pytest.Mon
 
 
 def test_two_runners_keep_independent_projection_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm.platforms import current_platform
-
-    if current_platform.device_type == "npu":
-        pytest.skip("CUDA vocabulary projection slicing is not used on Ascend NPU")
-
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
-    from vllm_gr.config import ConstraintBackendKind
     from vllm_gr.constraints import loader
+    from vllm_gr.v1.worker.cuda.constraint_projection import (
+        prepare_cuda_constraint_projection,
+    )
     from vllm_gr.v1.worker.sliced_logits_patch import apply_sliced_logits_patch
 
     apply_sliced_logits_patch()
     backends = []
     for window in ((3, 5), (40, 5), (0, 32000)):
         backend = _Backend()
-        backend.info.backend = ConstraintBackendKind.CUDA
+        backend.info.backend = "cuda"
         backend.vocab_slice = window
         backends.append(backend)
     queue = iter(backends)
@@ -449,7 +447,9 @@ def test_two_runners_keep_independent_projection_windows(monkeypatch: pytest.Mon
             runner.model = torch.nn.Sequential(LogitsProcessor(32000))
         runner.model[0]._gather_logits = lambda logits: logits
 
-    load = make_load_model_with_constraint_backend(weights)
+    load = make_load_model_with_constraint_backend(
+        weights, prepare_backend=prepare_cuda_constraint_projection
+    )
     close = make_shutdown_with_constraint_backend()
     a, b, full = _runner(), _runner(), _runner()
     try:

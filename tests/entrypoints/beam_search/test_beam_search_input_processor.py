@@ -18,6 +18,8 @@ from vllm.renderers.params import TokenizeParams
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 
+from tests.helpers.gr_config import admit_test_beam_limits
+from vllm_gr.config.backend_plan import BACKEND_PLAN_KEY
 from vllm_gr.entrypoints.beam_search.client import (
     AsyncBeamSearchClient,
     BeamSearchClient,
@@ -71,7 +73,10 @@ def _canonical_gr_config(
 
 
 def _make_engine(
-    parallel_config: Any = None, *, additional_config: dict[str, Any] | None = None
+    parallel_config: Any = None,
+    *,
+    additional_config: dict[str, Any] | None = None,
+    admitted: bool = True,
 ) -> Any:
     config = SimpleNamespace(
         additional_config=(
@@ -84,6 +89,8 @@ def _make_engine(
             data_parallel_size=1, data_parallel_size_local=1, local_engines_only=False
         ),
     )
+    if admitted and BACKEND_PLAN_KEY not in config.additional_config:
+        admit_test_beam_limits(config)
     # Use native request construction/rank validation without loading a model.
     native: Any = object.__new__(InputProcessor)
     native.vllm_config = config
@@ -385,7 +392,7 @@ def test_offline_compact_output_preserves_accepted_prompt_snapshot(
 
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "device,independent_k", [("cuda", False), ("cuda", True), ("npu", False)]
+    "device,independent_k", [("cuda", False), ("cuda", True)]
 )
 @pytest.mark.parametrize(  # type: ignore[misc]
     "trie_ids", [None, [0, 1], [1, 1], (1, 0), [True, 0], [-1, 0], [None, 1], [0]]
@@ -666,7 +673,7 @@ def test_request_requires_enabled_canonical_cuda_constraint_table(
         )
 
 
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 def test_request_rejects_width_below_fixed_runtime_before_submission(device: str) -> None:
     canonical = _canonical_gr_config(backend=device)
     canonical["gr"]["beam_width"] = [128, 128, 128]
@@ -684,16 +691,7 @@ def test_request_rejects_width_below_fixed_runtime_before_submission(device: str
     engine.submit_gr_session.assert_not_called()
 
 
-def test_npu_request_accepts_matching_width_and_canonical_backend() -> None:
-    engine = _make_engine(additional_config={"vllm_gr": _canonical_gr_config(backend="npu")})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    request = _prepare_request(
-        engine, [1, 2], BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True), online=True
-    )
-    assert request.beam_params.beam_width == 2
-
-
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 @pytest.mark.parametrize("widths", [None, [2, 2, 2], [2, 1, 2]])  # type: ignore[misc]
 def test_stage_widths_and_return_limit_reach_worker_contract(
     device: str, widths: list[int] | None
@@ -716,7 +714,7 @@ def test_stage_widths_and_return_limit_reach_worker_contract(
     assert request.output_options.num_return_sequences == 1
 
 
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
 def test_per_parent_beam_widths_reaches_worker_contract(device: str, online: bool) -> None:
     config = _canonical_gr_config(backend=device)
@@ -742,9 +740,9 @@ def test_per_parent_beam_widths_reaches_worker_contract(device: str, online: boo
 
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
 def test_cpu_per_parent_beam_widths_is_rejected_before_submission(online: bool) -> None:
-    engine = _make_engine()
+    engine = _make_engine(admitted=False)
     engine.vllm_config.device_config = SimpleNamespace(device="cpu")
-    with pytest.raises(BeamSearchRequestError, match="requires a CUDA ModelRunner or NPU"):
+    with pytest.raises(BeamSearchRequestError, match="No GR platform admitted"):
         _prepare_request(
             engine,
             [1, 2],
@@ -799,7 +797,7 @@ def test_cuda_unconstrained_requests_vary_budget_with_one_runtime(
 
 @pytest.mark.l1  # type: ignore[misc]
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize("backend", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("backend", ["cuda"])  # type: ignore[misc]
 @pytest.mark.parametrize("constrained", [None, True])  # type: ignore[misc]
 @pytest.mark.parametrize("table_format", ["constraint_table_v1", "constraint_table_v2"])  # type: ignore[misc]
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -872,171 +870,6 @@ def test_core_rechecks_constrained_length_without_frontend_validation(length: in
         match=f"effective generation length {length} must equal constraint_table_v1 depth",
     ):
         validate_gr_request(request, config=engine.vllm_config)
-
-
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize("steps", [1, 2, 3])  # type: ignore[misc]
-@pytest.mark.parametrize("widths", [None, [1, 2, 1]])  # type: ignore[misc]
-def test_npu_unconstrained_request_needs_no_constraint_artifact(
-    online: bool, steps: int, widths: list[int] | None
-) -> None:
-    canonical = _canonical_gr_config(enabled=False, backend="npu")
-    if widths is not None:
-        canonical["gr"]["beam_width"] = widths
-        canonical["gr"]["candidate_width"] = widths
-    # No stale path/digests should be needed in a catalog-free deployment.
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-
-    request = _prepare_request(
-        engine,
-        [1, 2],
-        BeamSearchParams(
-            beam_width=2,
-            max_tokens=steps,
-            ignore_eos=True,
-            dynamic_beam_widths=None if widths is None else widths[:steps],
-            result_width=1,
-        ),
-        online=online,
-    )
-
-    assert request.beam_params.max_tokens == steps
-    assert request.beam_params.dynamic_beam_widths == (
-        None if widths is None else tuple(widths[:steps])
-    )
-    assert request.output_options.num_return_sequences == 1
-    assert request.items[0].request.sampling_params.logprobs == 2
-
-
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "steps,accepted", [(4, True), (5, True), (6, True), (7, False)]
-)
-def test_npu_unconstrained_request_enforces_supported_generation_length(
-    online: bool, steps: int, accepted: bool
-) -> None:
-    canonical = _canonical_gr_config(enabled=False, backend="npu")
-    canonical["gr"]["max_decode_steps"] = 6
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    engine.vllm_config.model_config.get_num_kv_heads = lambda parallel: 8
-    engine.vllm_config.model_config.get_head_size = lambda: 128
-    process_inputs = Mock(wraps=engine.input_processor.process_inputs)
-    engine.input_processor.process_inputs = process_inputs
-
-    def prepare() -> BeamBatchRequest:
-        return _prepare_request(
-            engine,
-            [1, 2],
-            BeamSearchParams(beam_width=2, max_tokens=steps, ignore_eos=True),
-            online=online,
-        )
-
-    if accepted:
-        assert prepare().beam_params.max_tokens == steps
-    else:
-        with pytest.raises(
-            BeamSearchRequestError, match=r"^Decode steps 7 exceed runtime limit 6$"
-        ):
-            prepare()
-        process_inputs.assert_not_called()
-
-    engine.submit_gr_session.assert_not_called()
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-def test_npu_extended_capacity_rejects_unsafe_kv_geometry_before_submission(online: bool) -> None:
-    canonical = _canonical_gr_config(enabled=False, backend="npu")
-    canonical["gr"]["max_decode_steps"] = 6
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    engine.vllm_config.model_config.get_num_kv_heads = lambda parallel: 64
-    engine.vllm_config.model_config.get_head_size = lambda: 128
-
-    with pytest.raises(BeamSearchRequestError, match="SelectUnsharedKV 95 KiB buffer"):
-        _prepare_request(
-            engine,
-            [1, 2],
-            BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
-            online=online,
-        )
-    engine.submit_gr_session.assert_not_called()
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize("capacity", [4, 8])  # type: ignore[misc]
-def test_npu_per_parent_capacity_is_checked_before_submission(online: bool, capacity: int) -> None:
-    canonical = _canonical_gr_config(backend="npu")
-    canonical["gr"].update(beam_width=[4, 4, 4], candidate_width=[4, 4, 4], worker_decision=True)
-    canonical["gr"]["constraint_table"].update(max_top_k=capacity)
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    params = BeamSearchParams(
-        beam_width=4, per_parent_beam_widths=[4, 8, 1], max_tokens=3, ignore_eos=True
-    )
-    if capacity == 4:
-        with pytest.raises(BeamSearchRequestError, match="per_parent_beam_widths.*max_top_k=4"):
-            _prepare_request(engine, [1, 2], params, online=online)
-        engine.submit_gr_session.assert_not_called()
-    else:
-        # The explicit schedule overrides scalar K=4 and fits capacity 8.
-        request = _prepare_request(engine, [1, 2], params, online=online)
-        assert request.beam_params.per_parent_beam_widths == (4, 8, 1)
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize("sid_stage_vocab", [False, True])  # type: ignore[misc]
-def test_npu_catalog_free_per_parent_widths_are_rejected_before_submission(
-    online: bool, sid_stage_vocab: bool
-) -> None:
-    canonical = _canonical_gr_config(enabled=False, backend="npu")
-    canonical["gr"]["sid_stage_vocab"] = sid_stage_vocab
-    canonical["gr"]["worker_decision"] = True
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    with pytest.raises(BeamSearchRequestError, match="per_parent_beam_widths.*canonical NPU"):
-        _prepare_request(
-            engine,
-            [1, 2],
-            BeamSearchParams(
-                beam_width=2, per_parent_beam_widths=[2, 2, 1], max_tokens=3, ignore_eos=True
-            ),
-            online=online,
-        )
-    engine.submit_gr_session.assert_not_called()
-
-
-@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "candidate_width,widths,accepted",
-    [(2, None, True), (2, [2, 2, 2], True), (4, None, False), (2, [1, 2, 1], True)],
-)
-def test_npu_unconstrained_candidate_capacity_matches_retained_stage_widths(
-    online: bool, candidate_width: int, widths: list[int] | None, accepted: bool
-) -> None:
-    canonical = _canonical_gr_config(enabled=False, backend="npu")
-    canonical["gr"]["candidate_width"] = [2, candidate_width, candidate_width]
-    engine = _make_engine(additional_config={"vllm_gr": canonical})
-    engine.vllm_config.device_config = SimpleNamespace(device="npu")
-    params = BeamSearchParams(
-        beam_width=2, max_tokens=3, ignore_eos=True, dynamic_beam_widths=widths
-    )
-    if accepted:
-        request = _prepare_request(engine, [1, 2], params, online=online)
-        # Equal public schedules mean K follows each retained stage width,
-        # including request overrides; the engine maximum is only capacity.
-        assert request.beam_params.candidate_width is None
-        assert request.beam_params.dynamic_beam_widths == (
-            None if widths is None else tuple(widths)
-        )
-    else:
-        with pytest.raises(BeamSearchRequestError, match="candidate_width"):
-            _prepare_request(engine, [1, 2], params, online=online)
-        engine.submit_gr_session.assert_not_called()
 
 
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]

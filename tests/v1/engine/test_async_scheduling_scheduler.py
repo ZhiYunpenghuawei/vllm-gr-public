@@ -15,7 +15,6 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-from vllm.platforms import current_platform
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -28,6 +27,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.helpers.beam_requests import make_batch_request
+from tests.helpers.gr_config import admit_test_beam_limits
 from vllm_gr.v1.beam.batch_contracts import (
     BeamBatchOutput,
     BeamBatchResult,
@@ -47,18 +47,11 @@ from vllm_gr.v1.core.sched.beam_session import GRResourceStatus
 
 pytestmark = [
     pytest.mark.cpu_test,
-    pytest.mark.skipif(
-        current_platform.device_type == "npu",
-        reason="V1 async scheduler tests are temporarily disabled on NPU",
-    ),
 ]
 
 
 @pytest.fixture
 def scheduler(tmp_path, request):
-    if current_platform.device_type == "npu":
-        pytest.skip("V1 async scheduler tests are temporarily disabled on NPU")
-
     from vllm_gr.v1.core.sched.scheduler_patch import apply_scheduler_patch
 
     apply_scheduler_patch()
@@ -108,8 +101,8 @@ def scheduler(tmp_path, request):
     # CPU platform setup disables asynchronous model execution. These tests
     # instantiate AsyncScheduler directly and exercise its host-only state machine.
     config.scheduler_config.async_scheduling = True
-    # The model executor is simulated; admission still needs its CUDA identity.
-    config.device_config.device = torch.device("cuda")
+    # The model executor is simulated; admission consumes the driver's plan.
+    admit_test_beam_limits(config)
     kv = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],

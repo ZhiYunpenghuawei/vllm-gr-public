@@ -83,7 +83,7 @@ worker preserves candidate ancestry across reordering. The
 
 ## Platform execution
 
-Both backends use the same Beam batch and result contracts. At startup, each
+Built-in and extension platforms use the same Beam batch and result contracts. At startup, each
 process reads vLLM's `current_platform`. One matching installed GR plugin takes
 precedence on every device. With no matching plugin, GR requires a unique
 built-in match. The process caches the selected platform, which checks the
@@ -96,10 +96,8 @@ the bound stage or retirement operation.
   and Decode work. The [CUDA Prefill design](feature/cuda_prefill_graph.md)
   explains capture selection, and the [ModelRunner V2 design](module/model_runner_v2.md)
   describes integration with the native runner.
-- **Ascend** workers use NPU-specific attention and KV operations. Eligible
-  prompt shapes can use [BSND Prefill graphs](feature/npu_prefill_bsnd.md).
-  The [Ascend Decode design](feature/npu_decode_execution.md) describes the
-  fused and cascade paths and their fallback conditions.
+- Independent platforms bind their device-specific execution via the same
+  platform contract. No legacy Ascend adapter is shipped in the core.
 
 See the [platform backend contract](module/platform_backend.md) for platform
 selection and binding and [feature compatibility](../user_guide/feature_compatibility.md)

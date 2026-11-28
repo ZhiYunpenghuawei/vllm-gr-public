@@ -68,7 +68,7 @@ The default group checks Python source and stubs under `vllm_gr/` with
 `check_untyped_defs` and `follow_imports = "silent"`. The checker uses
 annotations from imports while reporting diagnostics for its explicit inputs.
 The regeneration hook checks the generated gRPC bindings. Test helpers and
-the CUDA and Ascend worker contracts use `follow_imports = "skip"` to
+the CUDA worker contract uses `follow_imports = "skip"` to
 isolate runtime dependencies. The hook prints each group's file count.
 
 See the [CUDA stage hooks contract](../design/module/model_runner_v2.md#cuda-stage-hooks-contract),

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
         ConstraintTableSpec,
         GRAttentionBackend,
         GRConfig,
-        NPUDecodeExecution,
+        constraint_backend_name,
         resolve_candidate_width,
     )
     from vllm_gr.config.parser import (
@@ -41,7 +41,7 @@ __all__ = [
     "ConstraintTableSpec",
     "GRAttentionBackend",
     "GRConfig",
-    "NPUDecodeExecution",
+    "constraint_backend_name",
     "GRConfigInput",
     "resolve_candidate_width",
     "gr_config_from_mapping",

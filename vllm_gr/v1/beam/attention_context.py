@@ -22,13 +22,9 @@ from vllm_gr.v1.beam.session_registry import BeamSessionRegistry
 class BeamDecisionBuffers:
     """Device-resident beam-decision state.
 
-    Holds ``sequence`` / ``beam_scores`` / ``group_token_num`` so that the
-    beam decision (``beam_search_group`` / ``beam_search_rec_final_select`` +
-    ``select_unshared_kv``) can run on the NPU worker with stable addresses,
-    matching the device Beam update order. The
-    buffers are sized to (max_batch, max_beams, max_decode_steps) and are
-    never reallocated after construction — this keeps every address stable
-    for ACL graph capture/replay and for the fused xllm decision operators.
+    Holds ``sequence`` / ``beam_scores`` / ``group_token_num`` at stable
+    addresses for Beam decisions. Buffers are sized to
+    (max_batch, max_beams, max_decode_steps) and never reallocated.
     """
 
     def __init__(
@@ -61,7 +57,7 @@ class BeamDecisionBuffers:
         """Clear all legacy state, or only one physical device row.
 
         A row reset leaves the legacy shared host counter untouched. The
-        persistent CUDA runner owns separate per-row device counters.
+        persistent runner owns separate per-row device counters.
         """
         if batch_index is None:
             self.sequence.zero_()
@@ -105,28 +101,7 @@ class BeamAttentionContext:
         num_layers: int,
         device: torch.device,
         dtype: torch.dtype,
-        enable_short_suffix_attention: bool = False,
     ):
-        if enable_short_suffix_attention:
-            if device.type != "cuda":
-                raise ValueError("Short suffix attention requires CUDA")
-            if max_decode_steps < 1:
-                raise ValueError("Short suffix attention requires positive pool capacity")
-            from vllm_gr.v1.attention.backends.beam_attn_gpu import (
-                short_suffix_head_size_supported,
-            )
-
-            if not short_suffix_head_size_supported(head_dim) or dtype not in (
-                torch.float16,
-                torch.bfloat16,
-                torch.float32,
-            ):
-                raise ValueError(
-                    "Short suffix attention requires a FlashAttention-compatible "
-                    "head size (multiple of 8, at most 256) and FP16/BF16/FP32"
-                )
-        self.decode_mode = "cascade"
-        self.enable_short_suffix_attention = enable_short_suffix_attention
         _validate_pool_dtype(dtype)
 
         self.max_batch = max_batch
@@ -153,24 +128,6 @@ class BeamAttentionContext:
             for _ in range(num_layers)
         ]
 
-        # Stable CUDA pointer tables consumed by the fused all-layer KV
-        # reorder.  Building these once removes two per-step device tensors and
-        # the matching in-place pointer-offset kernels from postprocessing.
-        if device.type == "cuda":
-            self.pool_key_ptrs = torch.tensor(
-                [pool.unshared_key.data_ptr() for pool in self.pools],
-                dtype=torch.int64,
-                device=device,
-            )
-            self.pool_value_ptrs = torch.tensor(
-                [pool.unshared_value.data_ptr() for pool in self.pools],
-                dtype=torch.int64,
-                device=device,
-            )
-        else:
-            self.pool_key_ptrs = None
-            self.pool_value_ptrs = None
-
         # Suffix KV temporary buffers (for cascade attention)
         # Partitioned by slot: each slot gets max_beams * max_decode_steps rows
         self.suffix_k_buf = torch.zeros(
@@ -184,35 +141,10 @@ class BeamAttentionContext:
             device=device,
         )
 
-        # --- CUDA/ACL Graph fixed-address device buffers ---
-        # decode_step_buf: device-side scalar, read by Triton cache_unshared_kv kernel
-        # and filled each step before model forward / graph replay.
+        # Device-side step scalar, filled before model forward / graph replay.
         self.decode_step_buf = torch.zeros(1, dtype=torch.int32, device=device)
 
-        # decode_step_1based_buf: device-side 1-based step count consumed by the
-        # xllm cache_unshared_kv / x_attention kernels (their ABI takes an int32
-        # [1] device tensor).  Refreshed each step outside the graph so a
-        # captured ACL graph reads the fresh value at replay.
-        self.decode_step_1based_buf = torch.zeros(1, dtype=torch.int32, device=device)
-
-        # xllm_block_table_buf: pool-slot block table for the xllm
-        # cache_unshared_kv kernel (replaces the per-call torch.tensor([slot])
-        # allocation; request i maps to pool slot xllm_block_table_buf[i]).
-        self.xllm_block_table_buf = torch.zeros(max_batch, dtype=torch.int32, device=device)
-
-        # Whether the attached worker consumes the NPU xllm device buffers
-        # (decode_step_1based_buf / xllm_block_table_buf).  Only NPU kernels
-        # read them; on GPU the Triton copy_suffix/cache_unshared kernels read
-        # ``decode_step_buf`` alone, so the per-step fill_ of the xllm buffers
-        # (two redundant launches on the same stream) is skipped there.
-        self._gr_uses_xllm_buffers = getattr(device, "type", None) == "npu"
-
-        # aux_key_buf / aux_value_buf: pre-allocated PER-LAYER scratch buffers
-        # for select_unshared_kv. The leading dim is num_layers: the fused
-        # Triton path reorders all layers in one launch, so each layer must
-        # stage through its own slice (a single shared buffer would make
-        # layers clobber each other's staging data). The Python fallback
-        # and the cascade reorder path index the same buffer with [layer].
+        # Separate per-layer scratch for reorder.
         self.aux_key_buf = torch.zeros(
             (num_layers, max_beams, num_kv_heads, max_decode_steps, head_dim),
             dtype=dtype,
@@ -226,6 +158,25 @@ class BeamAttentionContext:
 
         # Device-resident beam-decision state .
         self.decision = BeamDecisionBuffers(max_batch, max_beams, max_decode_steps, device, dtype)
+
+    def reorder(
+        self,
+        parent: torch.Tensor,
+        slot: int,
+        decode_step: int,
+        *,
+        layout_prevalidated: bool = False,
+    ) -> None:
+        from vllm_gr.v1.beam.reorder import reorder_unshared_kv
+
+        reorder_unshared_kv(
+            parent,
+            slot,
+            self.pools,
+            decode_step,
+            aux_key=self.aux_key_buf,
+            aux_value=self.aux_value_buf,
+        )
 
     def get_suffix_buf(self, slot: int, beam_width: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get suffix KV buffer slice for a specific slot.

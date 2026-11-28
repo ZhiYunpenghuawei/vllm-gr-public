@@ -49,15 +49,6 @@ CUDA_STAGE_FILES = [
     "tests/tools/cuda_stage_typing_cases.py",
 ]
 
-# Check the NPU input helpers together with both production callers so a
-# signature change cannot escape caller-side validation.
-NPU_WORKER_GROUP = "npu-worker"
-NPU_WORKER_FILES = [
-    "vllm_gr/v1/worker/npu/npu_model_runner_patch.py",
-    "vllm_gr/v1/worker/npu/npu_beam_stage_runner.py",
-    "vllm_gr/v1/worker/npu/npu_model_runner_inputs.py",
-]
-
 
 def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     """Group production and test files and expand runner contract checks."""
@@ -65,14 +56,11 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         "": [],
         "tests": [],
         CUDA_STAGE_GROUP: [],
-        NPU_WORKER_GROUP: [],
     }
     normalized_paths = (posixpath.normpath(path.replace("\\", "/")) for path in changed_files)
     for path in dict.fromkeys(normalized_paths):
         if path in CUDA_STAGE_FILES or path == "tools/pre_commit/mypy.py":
             groups[CUDA_STAGE_GROUP] = list(CUDA_STAGE_FILES)
-        elif path in NPU_WORKER_FILES:
-            groups[NPU_WORKER_GROUP] = list(NPU_WORKER_FILES)
         elif not path.endswith((".py", ".pyi")) or path.startswith(GENERATED_GRPC_PREFIX):
             continue
         elif path.startswith("vllm_gr/"):
@@ -108,7 +96,7 @@ def mypy(
         args += ["--follow-imports", follow_imports]
     if file_group:
         args.append("--strict")
-    if file_group in {CUDA_STAGE_GROUP, NPU_WORKER_GROUP}:
+    if file_group == CUDA_STAGE_GROUP:
         # mypy 1.11.1 cannot serialize some placeholders in the cyclic native
         # imports. Disable cache reads AND writes for this small boundary.
         args += ["--no-incremental", "--cache-dir", os.devnull, "--warn-unused-ignores"]

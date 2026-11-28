@@ -32,11 +32,8 @@ def check_opencv_env() -> None:
             f"Multiple opencv packages detected: {pkg_list}\n"
             "They all provide cv2 and conflict with each other.\n"
             f"Fix: pip uninstall {' '.join(others)} -y, then keep exactly one "
-            "opencv distribution. On CUDA/CPU reinstall "
-            "opencv-python-headless>=4.13.0; on Ascend restore the "
-            "opencv-python-headless supplied by the vendor image instead: "
-            "current opencv releases declare numpy>=2 and conflict with the "
-            "Ascend numpy pin."
+            "opencv distribution compatible with the installed NumPy and "
+            "the selected platform's dependency requirements."
         )
 
     # numpy 2.x ABI vs cv2 compiled against numpy 1.x

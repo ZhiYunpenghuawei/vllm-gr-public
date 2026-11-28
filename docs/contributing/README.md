@@ -9,8 +9,7 @@ Use this guide to set up a checkout, validate a change and open a pull request.
 - **Editing documentation?** Run the [documentation checks](pre_commit_setup.md#documentation-checks)
   on the Markdown files you changed and verify their links. These checks run
   without an accelerator.
-- **Changing runtime code?** Follow the [CUDA](../getting_started/installation/gpu.md)
-  or [Ascend](../getting_started/installation/npu.md) installation guide for
+- **Changing runtime code?** Follow the [CUDA](../getting_started/installation/gpu.md) installation guide for
   an editable checkout with development dependencies. To check your runtime,
   enable [GR CLI dispatch](../cli/README.md#command-form-and-installation)
   and run [`vllm check-env --gr`](../cli/check_env.md).

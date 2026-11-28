@@ -6,8 +6,7 @@ script, metrics, and argument table.
 
 ## Prerequisites
 
-- Install vLLM-GR for [CUDA](../getting_started/installation/gpu.md) or
-  [Ascend](../getting_started/installation/npu.md).
+- Install vLLM-GR for [CUDA](../getting_started/installation/gpu.md).
 - Download the OneRec-1.7B model snapshot and tokenizer. Set `ONEREC_MODEL` to
   the local snapshot path.
 - [Download the dataset](README.md#onerec-benchmark-dataset). The examples
@@ -27,7 +26,7 @@ mkdir -p "$ONEREC_WORKDIR"
 Use a fresh work directory when changing the model or dataset. Then build the
 [full catalog from the dataset](../../examples/online_serving/catalog/README.md#build-a-catalog-from-the-onerec-dataset).
 Follow the [remaining table and YAML steps](../../examples/online_serving/catalog/README.md#extract-constraint-triples-from-the-catalog).
-Choose `ONEREC_BACKEND=cuda` or `ONEREC_BACKEND=npu` before generating the
+Choose `ONEREC_BACKEND=cuda` before generating the
 configuration. Keep `catalog.json`, `constraint_triples.json`,
 `constraint_table.safetensors` and `vllm_gr_config.yaml` in `ONEREC_WORKDIR`.
 

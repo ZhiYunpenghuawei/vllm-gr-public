@@ -15,10 +15,6 @@ def native_platform(enum: str, device: str) -> Platform:
         from tests.helpers.cuda_platform import CudaGRPlatform
 
         return CudaGRPlatform.native_platform_type()
-    if enum == "OOT" and device == "npu":
-        from tests.helpers.ascend_platform import AscendGRPlatform
-
-        return AscendGRPlatform.native_platform_type()
     native = VendorNative()
     native._enum = PlatformEnum[enum]
     native.device_type = device

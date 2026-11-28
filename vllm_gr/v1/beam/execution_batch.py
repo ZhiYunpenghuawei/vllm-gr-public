@@ -3,7 +3,7 @@
 """Device-independent execution geometry for a fixed Beam batch session.
 
 This module deliberately contains no tensor, KV-cache, attention, or graph
-objects. GPU and NPU adapters consume the same immutable row mapping and own
+objects. Platform adapters consume the same immutable row mapping and own
 the device-specific representation themselves.
 """
 

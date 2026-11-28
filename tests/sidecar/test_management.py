@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from tests.helpers.gr_config import admit_test_beam_limits
 from vllm_gr.constraints.versioned_table import (
     INITIAL_CONSTRAINT_VERSION,
     VersionedConstraintTable,
@@ -32,12 +33,11 @@ class Core:
         self.vllm_config._vllm_gr_parsed_config = SimpleNamespace(
             beam_max_width=128,
             constraint=SimpleNamespace(
-                table=SimpleNamespace(
-                    enabled=True, path="/tries/v1/table", backend=SimpleNamespace(value="cuda")
-                )
+                table=SimpleNamespace(enabled=True, path="/tries/v1/table", backend="cuda")
             ),
         )
         self.vllm_config.scheduler_config = SimpleNamespace(async_scheduling=True)
+        admit_test_beam_limits(self.vllm_config, supports_online_trie_reload=True)
         self.scheduler = SimpleNamespace(running=[], _gr_v1_sessions={})
         self.batch_queue: list[Any] = []
         self.paused = False
@@ -215,6 +215,7 @@ def test_production_routes_forward_arguments_and_map_errors() -> None:
 
 @pytest.mark.l1
 def test_runner_keeps_the_same_wrapper_across_reload() -> None:
+    pytest.importorskip("triton")
     from vllm_gr.v1.worker.cuda import gpu_beam_stage_runner as stages
     from vllm_gr.v1.worker.cuda.v1.gpu_beam_stage_runner_v1 import CudaStageHooksV1
 
@@ -333,14 +334,14 @@ def test_pause_returns_upstream_drain_future_without_custom_polling() -> None:
 
 
 @pytest.mark.l1
-@pytest.mark.parametrize("unsupported", ["disabled", "npu", "sync"])
+@pytest.mark.parametrize("unsupported", ["disabled", "platform", "sync"])
 def test_trie_rejects_unsupported_execution_before_worker_rpc(unsupported: str) -> None:
     core = Core()
     config = core.vllm_config._vllm_gr_parsed_config
     if unsupported == "disabled":
         config.constraint = None
-    elif unsupported == "npu":
-        config.constraint.table.backend.value = "npu"
+    elif unsupported == "platform":
+        admit_test_beam_limits(core.vllm_config, supports_online_trie_reload=False)
     else:
         core.vllm_config.scheduler_config.async_scheduling = False
     result = reload_trie(core, "/v2", "v2")

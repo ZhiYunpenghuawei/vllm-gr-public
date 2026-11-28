@@ -1256,7 +1256,7 @@ def get_stage_runner(
     dispatch_session = validate_dispatch_session(scheduler_output)
     stages = validate_dispatch(scheduler_output, session=dispatch_session)
     (m,) = stages
-    from vllm_gr.v1.worker.gr_context import (
+    from vllm_gr.v1.worker.cuda.gr_context import (
         _create_beam_context,
         _get_gr_config,
     )

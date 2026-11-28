@@ -57,32 +57,10 @@ this is documented intent rather than a tested invariant. The
 [CUDA backend](../../../vllm_gr/constraints/cuda_backend.py) implements
 selection.
 
-### Ascend
-
-The loader creates a six-table view per Trie. A multi-Trie table is rebased;
-a single-Trie table is returned unchanged. When stage vocabulary slicing is
-enabled, the operator receives a second, compacted six-table set whose token
-values are remapped through `searchsorted`, so it does not see model token IDs
-on that path. The loader builds two shared prefix maps, for the first and
-second SID positions, plus three stage token-ID tables, all from the union of
-the Tries.
-
-Stage vocabulary is optional. `build_npu_stage_vocab` returns `None` when it
-cannot shrink the vocabulary, and the backend falls back to full-vocabulary
-selection when the active logits width does not match the stage vocabulary.
-The [NPU backend](../../../vllm_gr/constraints/npu_backend.py) groups
-contiguous rows with the same selector and invokes `rec_constrained_topk` on
-their table. The worker path uses `select_for_rows` with one host Trie ID per
-physical row, which avoids a device readback and keeps the call capture-safe.
-Selection runs outside the captured model forward. Scores are normalized over
-legal candidates at the current prefix.
-
 ### CPU
 
 The [CPU backend](../../../vllm_gr/constraints/cpu_backend.py) is a host-table
-backend that follows the shared full-window scoring contract. It is not a
-reference for NPU log probabilities, because the fused NPU operator normalizes
-over the legal candidate set. Parity tests compare it with the torch fallback
+backend that follows the shared full-window scoring contract. Parity tests compare it with the torch fallback
 routed through a CPU-resident operator.
 
 ## Reload and retention
@@ -101,8 +79,8 @@ table operation after `gr.trie_retention_seconds` (default 60). See the
 | --- | --- |
 | [Table tests](../../../tests/constraints/test_table.py) | Tensor layout, offsets, pair keys and payload limits. |
 | [Artifact tests](../../../tests/constraints/test_artifact.py) | Safetensors round trips and multi-Trie metadata. |
-| [Backend parity tests](../../../tests/constraints/test_backend_parity.py) | CPU and torch fallback against the shared scoring contract. |
-| [NPU routing tests](../../../tests/constraints/test_npu_multi_trie_routing.py) | Per-row selector expansion and grouped dispatch. |
+| [CPU backend tests](../../../tests/constraints/test_cpu_backend.py) | Reference candidate selection and scoring. |
+| [CUDA backend tests](../../../tests/constraints/test_cuda_backend.py) | CUDA constraint table execution and readiness. |
 
 ## Source map
 
@@ -111,6 +89,4 @@ table operation after `gr.trie_retention_seconds` (default 60). See the
 | [Table validation](../../../vllm_gr/constraints/table.py) | Tensor shapes, offsets, pair keys and limits. |
 | [Artifact I/O](../../../vllm_gr/constraints/artifact.py) | Reads and writes single- and multi-Trie safetensors. |
 | [CUDA backend](../../../vllm_gr/constraints/cuda_backend.py) | CUDA lookup, slicing and selection. |
-| [NPU tables](../../../vllm_gr/constraints/npu_tables.py) | Six-table views, rebasing and stage vocabulary. |
-| [NPU backend](../../../vllm_gr/constraints/npu_backend.py) | Per-row routing and `rec_constrained_topk`. |
 | [CPU backend](../../../vllm_gr/constraints/cpu_backend.py) | Host-table selection and the shared scoring contract. |

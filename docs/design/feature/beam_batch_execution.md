@@ -3,7 +3,7 @@
 A Beam batch request asks for ranked continuations of a fixed, ordered set of
 prompts. The frontend submits all prompts together. Each prompt keeps its own
 native request ID, scores and beam history, and the caller receives one
-terminal result for the batch on either CUDA or Ascend.
+terminal result for the batch on the admitted GR platform.
 
 ## How a batch runs
 
@@ -67,7 +67,7 @@ step.
 | Request form | Rejects `prompt_embeds`, `mm_features`, empty prompts and LoRA. Requires `ignore_eos=true`, `sampling_params.max_tokens` equal to `beam_params.max_tokens`, and `n=1`. EngineCore also clears native stop tokens. |
 | Engine capacity | Dispatch accepts one to eight prompts within native request, Prefill token, context and KV limits. The request beam width must equal the engine's fixed startup beam width. |
 | Dynamic widths | `dynamic_beam_widths` and `per_parent_beam_widths` must be tuples of length `max_tokens`; `max_tokens` must be 1 to 3 when either is set. Entries must be positive and at most the beam width, the first per-parent width must equal the first retained width, and each stage must satisfy `input_width * per_parent >= output_width`. |
-| Device and catalog | Ascend budgets Decode rows at the largest input width across Decode stages. Table-constrained requests must match the table depth and fit its candidate capacity. |
+| Device and catalog | Table-constrained requests must match the table depth and fit its candidate capacity. |
 | Output options | Candidate width counts expansions per parent. Retained width counts survivors per prompt. The final retained width bounds `num_return_sequences`. |
 
 Requests and results use wire protocol version 2. Multiprocess clients send
@@ -108,7 +108,7 @@ Prefill graph if its token bucket was captured. PIECEWISE uses the token
 bucket alone and can serve different admitted request counts.
 
 Size `max-num-seqs` for logical requests and `max-num-batched-tokens` for the
-Prefill workload and, on Ascend, the peak Decode row count. See the
+Prefill workload and the platform's admitted execution limits. See the
 [batch and token budgets](../../configuration/README.md#batch-sizes-and-token-budgets)
 and [OneRec walkthrough](../../user_guide/onerec_quickstart.md).
 

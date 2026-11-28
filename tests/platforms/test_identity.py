@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "enum, device", [("ROCM", "cuda"), ("CPU", "cpu"), ("OOT", "foreign")]
+    "enum, device", [("ROCM", "cuda"), ("CPU", "cpu"), ("OOT", "foreign"), ("OOT", "vendor")]
 )
 def test_only_supported_native_platforms_match(
     monkeypatch: pytest.MonkeyPatch, enum: str, device: str
@@ -27,8 +27,25 @@ def test_only_supported_native_platforms_match(
         table.current_gr_platform()
 
 
+def test_legacy_native_ascend_identity_has_no_builtin_gr_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reproduce the identity the retired built-in probe matched, without the
+    # vendor distribution or its import side effects.
+    from tests.helpers.native_platform import VendorNative
+
+    class NPUPlatform(VendorNative):
+        device_type = "npu"
+
+    NPUPlatform.__module__ = "vllm_ascend.platform"
+    NPUPlatform.__qualname__ = "NPUPlatform"
+    monkeypatch.setattr(vllm.platforms, "current_platform", NPUPlatform())
+    with pytest.raises(UnsupportedBackendError, match="No GR integration"):
+        table.current_gr_platform()
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
-    "enum, device, name", [("CUDA", "cuda", "cuda"), ("OOT", "npu", "ascend")]
+    "enum, device, name", [("CUDA", "cuda", "cuda")]
 )
 def test_winner_inherits_native_platform(
     monkeypatch: pytest.MonkeyPatch, enum: str, device: str, name: str
@@ -55,6 +72,6 @@ def test_worker_rejects_choices_admitted_for_another_native_platform(
     monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("CUDA", "cuda"))
     plan = admit_backend_plan(config)
     assert plan is not None and plan.backend_id == "cuda"
-    monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("OOT", "npu"))
-    with pytest.raises(RuntimeError, match="Worker backend plan mismatch"):
-        bind_backend_services(SimpleNamespace(vllm_config=config, device="npu"))
+    monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("OOT", "vendor"))
+    with pytest.raises(UnsupportedBackendError, match="No GR integration"):
+        bind_backend_services(SimpleNamespace(vllm_config=config, device="vendor"))

@@ -6,24 +6,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 
-from tests.helpers.native_platform import native_platform
 from tests.helpers.paths import REPO_ROOT
-from vllm_gr.platforms import table
-from vllm_gr.platforms.errors import UnsupportedBackendError
 from vllm_gr.v1.attention.backends import beam_attn
-
-try:
-    import torch_npu  # noqa: F401
-
-    _TORCH_NPU_IMPORTABLE = True
-except (ImportError, RuntimeError):
-    _TORCH_NPU_IMPORTABLE = False
 
 
 def test_facade_import_does_not_load_platform_execution_modules() -> None:
@@ -34,7 +24,7 @@ import sys
 import vllm_gr.v1.attention.backends.beam_attn
 
 assert "vllm_gr.v1.attention.backends.beam_attn_gpu" not in sys.modules
-assert "vllm_gr.v1.attention.backends.beam_attn_npu" not in sys.modules
+assert not any(name.startswith("vllm_ascend") for name in sys.modules)
 """
     subprocess.run(
         [sys.executable, "-c", code],
@@ -45,132 +35,10 @@ assert "vllm_gr.v1.attention.backends.beam_attn_npu" not in sys.modules
     )
 
 
-def test_xllm_module_import_fails_fast_without_operator_library() -> None:
-    """Importing beam_attn_npu_xllm without xllm-ops must raise immediately."""
-    project_root = REPO_ROOT
-    code = """
-import importlib.util
-import os
-import sys
-import types
-from unittest import mock
+def test_cuda_attention_uses_its_own_execution_module() -> None:
+    from vllm_gr.v1.attention.backends import beam_attn_gpu
 
-# Keep torch from auto-loading the (stubbed) torch_npu backend extension.
-os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-
-# Simulate a machine without the xllm-ops library: every probe reports
-# unavailable and names the missing binding.  torch_npu is stubbed with a
-# real module carrying a spec (a bare stub breaks find_spec in transformers).
-stub = types.ModuleType("torch_npu")
-stub._C = mock.MagicMock()
-stub.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
-stub.__file__ = "/fake/torch_npu/__init__.py"
-sys.modules["torch_npu"] = stub
-import vllm_gr.ops.npu.beam_ops as beam_ops
-
-mock_probe = mock.patch.object(beam_ops, "is_available", return_value=False)
-mock_reason = mock.patch.object(
-    beam_ops, "unavailable_reason", return_value="custom_ops_lib cannot be imported"
-)
-with mock_probe, mock_reason:
-    try:
-        import vllm_gr.v1.attention.backends.beam_attn_npu_xllm
-    except RuntimeError as exc:
-        assert "requires the xllm-ops library" in str(exc), exc
-        assert "custom_ops_lib cannot be imported" in str(exc), exc
-    else:
-        raise AssertionError("expected RuntimeError without xllm-ops")
-
-# The failed import must not linger in sys.modules.
-assert "vllm_gr.v1.attention.backends.beam_attn_npu_xllm" not in sys.modules
-"""
-    subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=project_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("platform_enum", "placement", "lineage", "expected"),
-    [
-        ("CUDA", "cuda", (), "gpu"),
-        ("OOT", "npu", ("vllm_ascend.platform.NPUPlatform",), "npu"),
-        ("ROCM", "cuda", (), None),
-        ("OOT", "npu", ("other.platform.Accelerator",), None),
-    ],
-)
-def test_platform_dispatch_selects_exactly_one_execution_module(
-    monkeypatch: pytest.MonkeyPatch,
-    platform_enum: str,
-    placement: str,
-    lineage: tuple[str, ...],
-    expected: str | None,
-) -> None:
-    import vllm.platforms
-
-    native = native_platform(platform_enum, placement)
-    if lineage == ("other.platform.Accelerator",):
-        from tests.helpers.native_platform import VendorNative
-
-        native = VendorNative()
-        native.device_type = "npu"
-    monkeypatch.setattr(vllm.platforms, "current_platform", native)
-    modules = {
-        name: ModuleType(f"vllm_gr.v1.attention.backends.beam_attn_{name}")
-        for name in ("gpu", "npu")
-    }
-    for module in modules.values():
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-
-    if expected is None:
-        with pytest.raises(UnsupportedBackendError, match="No GR integration"):
-            beam_attn._get_platform_execution_module()
-    else:
-        assert beam_attn._get_platform_execution_module() is modules[expected]
-
-
-@pytest.mark.npu_test  # type: ignore[misc]
-@pytest.mark.skipif(  # type: ignore[misc]
-    not _TORCH_NPU_IMPORTABLE, reason="torch_npu is not installed"
-)
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("mode", "expected_module_name"),
-    [
-        ("cascade", "vllm_gr.v1.attention.backends.beam_attn_npu"),
-        ("xllm", "vllm_gr.v1.attention.backends.beam_attn_npu_xllm"),
-    ],
-)
-def test_npu_dispatch_selects_execution_mode_module(
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-    expected_module_name: str,
-) -> None:
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", False)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", True)
-    from tests.helpers.ascend_platform import AscendGRPlatform
-    from vllm_gr.platforms.ascend import decode
-
-    monkeypatch.setattr(table, "current_gr_platform", AscendGRPlatform)
-    monkeypatch.setattr(decode, "engine_mode", lambda config: mode)
-    assert beam_attn._get_platform_execution_module().__name__ == expected_module_name
-
-
-def test_ascend_decode_choices_are_engine_local(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm_gr.ops.npu import beam_ops
-    from vllm_gr.platforms.ascend.decode import engine_mode
-
-    auto = SimpleNamespace(additional_config={})
-    explicit = SimpleNamespace(
-        additional_config={"vllm_gr": {"gr": {"npu_decode_execution": "cascade"}}}
-    )
-    monkeypatch.setattr(beam_ops, "is_available", lambda: True)
-    assert engine_mode(auto) == "xllm"
-    assert engine_mode(explicit) == "cascade"
-    assert engine_mode(None) == "cascade"
-    assert engine_mode(auto) == "xllm"
+    assert beam_attn._get_cuda_execution_module() is beam_attn_gpu
 
 
 @pytest.mark.parametrize("tuple_cache", [False, True])  # type: ignore[misc]
@@ -192,11 +60,9 @@ def test_forward_preserves_cache_and_attention_arguments(
     )
     monkeypatch.setattr(
         beam_attn,
-        "_get_platform_execution_module",
+        "_get_cuda_execution_module",
         lambda: execution,
     )
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", tuple_cache)
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", not tuple_cache)
 
     impl = object.__new__(beam_attn.BeamAttentionImpl)
     impl.kv_sharing_target_layer_name = None
@@ -226,9 +92,7 @@ def test_forward_preserves_cache_and_attention_arguments(
     metadata = SimpleNamespace(slot_mapping=slot_mapping, is_beam_decode=False, beam_session=None)
     k_scale = torch.tensor(1.0)
     v_scale = torch.tensor(2.0)
-    layer = (
-        SimpleNamespace() if tuple_cache else SimpleNamespace(_k_scale=k_scale, _v_scale=v_scale)
-    )
+    layer = SimpleNamespace(_k_scale=k_scale, _v_scale=v_scale)
 
     returned = impl.forward(
         layer=layer,
@@ -248,8 +112,8 @@ def test_forward_preserves_cache_and_attention_arguments(
     torch.testing.assert_close(reshape_args[3], value_cache)
     assert reshape_args[4] is slot_mapping
     assert reshape_args[5] == "auto"
-    assert reshape_args[6] is (None if tuple_cache else k_scale)
-    assert reshape_args[7] is (None if tuple_cache else v_scale)
+    assert reshape_args[6] is k_scale
+    assert reshape_args[7] is v_scale
 
     cascade_args = calls["cascade"]
     assert cascade_args["output"] is output
@@ -288,9 +152,7 @@ def test_forward_incremental_uses_beam_pool_and_skips_paged_cache(
         cascade_attention=cascade_attention,
         cache_unshared_kv=write_eager_step,
     )
-    monkeypatch.setattr(beam_attn, "_get_platform_execution_module", lambda: execution)
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", False)
+    monkeypatch.setattr(beam_attn, "_get_cuda_execution_module", lambda: execution)
 
     # Create a session using our 3-layer architecture
     context = BeamAttentionContext(
@@ -375,79 +237,6 @@ def test_forward_incremental_uses_beam_pool_and_skips_paged_cache(
     torch.testing.assert_close(pool.unshared_value[0, :2, :, 0, :], value)
 
 
-def test_npu_prefill_attention_consumes_common_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fia_kwargs: dict[str, Any] = {}
-
-    def fake_fia_v2(**kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
-        fia_kwargs.update(kwargs)
-        return torch.zeros(7, 8, 64), torch.empty(1)
-
-    fake_torch_npu = SimpleNamespace(npu_fused_infer_attention_score_v2=fake_fia_v2)
-    monkeypatch.setitem(sys.modules, "torch_npu", fake_torch_npu)
-    npu_name = "vllm_gr.v1.attention.backends.beam_attn_npu"
-    # ``from pkg import beam_attn_npu`` would return a stale module on machines
-    # where the module was already imported (the package attribute short-circuits
-    # _handle_fromlist), so resolve it explicitly and patch its torch_npu global.
-    try:
-        beam_attn_npu = sys.modules[npu_name]
-    except KeyError:
-        import importlib
-
-        beam_attn_npu = importlib.import_module(npu_name)
-    monkeypatch.setattr(beam_attn_npu, "torch_npu", fake_torch_npu)
-
-    from vllm_gr.v1.attention.backends.beam_attn_metadata import BeamAttentionMetadata
-
-    block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-    metadata = BeamAttentionMetadata(
-        num_actual_tokens=7,
-        max_query_len=4,
-        query_start_loc=torch.tensor([0, 3, 7, 0, 0], dtype=torch.int32),
-        max_seq_len=7,
-        seq_lens=torch.tensor([7, 4, 0], dtype=torch.int32),
-        block_table=block_table,
-        slot_mapping=torch.tensor([0, 1, 2, 3, 4, 5, 6], dtype=torch.int64),
-        causal=True,
-        is_prefill_graph_exec=True,
-        num_reqs=2,
-        num_heads=8,
-        num_kv_heads=8,
-        block_size=16,
-        query_start_loc_cpu=[0, 3, 7, 0, 0],
-        seq_lens_cpu=[7, 4, 0],
-    )
-    output = torch.zeros(7, 8, 64)
-    # Padded batch: 8 query rows vs 7 actual tokens (vllm-ascend pads to
-    # num_tokens_padded) — the fast path must slice to the real rows.
-    query = torch.zeros(8, 8, 64)
-    key_cache = torch.zeros(8, 16, 8, 64)
-    value_cache = torch.zeros(8, 16, 8, 64)
-
-    beam_attn_npu.prefill_attention(
-        output=output,
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        attn_metadata=metadata,
-        sliding_window_size=None,
-        scale=0.125,
-        logits_soft_cap=0.0,
-        vllm_flash_attn_version=0,
-    )
-
-    assert fia_kwargs["query"].shape == (7, 8, 64)
-    assert fia_kwargs["actual_seq_qlen"] == [3, 7]
-    assert fia_kwargs["actual_seq_kvlen"] == [7, 4]
-    assert fia_kwargs["block_table"] is block_table
-    assert fia_kwargs["num_query_heads"] == 8
-    assert fia_kwargs["num_key_value_heads"] == 8
-    assert fia_kwargs["block_size"] == 16
-    assert fia_kwargs["input_layout"] == "TND"
-    assert torch.equal(output[:4], torch.zeros(4, 8, 64))
-
-
 pytestmark = pytest.mark.cpu_test
 
 
@@ -464,11 +253,9 @@ def test_incremental_forward_rejects_invalid_state_before_cache_write(
     def unexpected(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("invalid beam state reached a device operation")
 
-    monkeypatch.setattr(beam_attn, "CUDA_DEVICE", True)
-    monkeypatch.setattr(beam_attn, "NPU_DEVICE", False)
     monkeypatch.setattr(
         beam_attn,
-        "_get_platform_execution_module",
+        "_get_cuda_execution_module",
         lambda: SimpleNamespace(
             reshape_and_cache=unexpected, cache_unshared_kv=unexpected, cascade_attention=unexpected
         ),

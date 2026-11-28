@@ -12,13 +12,12 @@ import torch
 
 from tests.constraints.test_table import make_table
 from vllm_gr.config import (
-    ConstraintBackendKind,
     ConstraintConfig,
     ConstraintMode,
     ConstraintTableSpec,
     GRConfig,
 )
-from vllm_gr.constraints import loader
+from vllm_gr.constraints import cuda_loader
 from vllm_gr.constraints.artifact import save_constraint_table_artifact
 from vllm_gr.constraints.backend import ConstraintMetadata
 from vllm_gr.constraints.loader import load_constraint_backend
@@ -35,7 +34,7 @@ def test_cuda_loader_readiness_select_and_close(tmp_path: Path) -> None:
     backend = load_constraint_backend(
         ConstraintTableSpec(
             enabled=True,
-            backend=ConstraintBackendKind.CUDA,
+            backend="cuda",
             path=str(path),
             artifact_digest=digest,
             tokenizer_digest="sha256:" + "b" * 64,
@@ -47,7 +46,7 @@ def test_cuda_loader_readiness_select_and_close(tmp_path: Path) -> None:
         max_rows=2,
     )
     assert backend is not None
-    assert backend.info.backend is ConstraintBackendKind.CUDA
+    assert backend.info.backend == "cuda"
     assert backend.info.host_memory_bytes == 0
     assert backend.info.device_memory_bytes == make_table().total_bytes
     output = backend.select(
@@ -110,16 +109,16 @@ def test_cuda_readiness_failure_closes_unpublished_backend(
     path = tmp_path / "table.safetensors"
     digest = save_constraint_table_artifact(make_table(), path)
     uploaded: list[object] = []
-    original_upload = loader._upload_cuda_backend  # noqa: SLF001
+    original_upload = cuda_loader._upload_cuda_backend  # noqa: SLF001
 
     def record_upload(*args: object, **kwargs: object) -> object:
         result = original_upload(*args, **kwargs)
         uploaded.append(result[0])
         return result
 
-    monkeypatch.setattr(loader, "_upload_cuda_backend", record_upload)
+    monkeypatch.setattr(cuda_loader, "_upload_cuda_backend", record_upload)
     monkeypatch.setattr(
-        loader,
+        cuda_loader,
         "_run_cuda_readiness",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("readiness failed")),
     )
@@ -127,7 +126,7 @@ def test_cuda_readiness_failure_closes_unpublished_backend(
         load_constraint_backend(
             ConstraintTableSpec(
                 enabled=True,
-                backend=ConstraintBackendKind.CUDA,
+                backend="cuda",
                 path=str(path),
                 artifact_digest=digest,
                 tokenizer_digest="sha256:" + "b" * 64,
@@ -150,7 +149,7 @@ def test_cuda_loader_rejects_fp32_logits_before_upload(tmp_path: Path) -> None:
         load_constraint_backend(
             ConstraintTableSpec(
                 enabled=True,
-                backend=ConstraintBackendKind.CUDA,
+                backend="cuda",
                 path=str(path),
                 artifact_digest=digest,
                 tokenizer_digest="sha256:" + "b" * 64,
@@ -171,7 +170,7 @@ def test_cuda_loader_rejects_unsupported_table_degree_before_upload() -> None:
     )
 
     with pytest.raises(ValueError, match="above supported 65536"):
-        loader._upload_cuda_backend(  # noqa: SLF001
+        cuda_loader._upload_cuda_backend(  # noqa: SLF001
             oversized,
             device=torch.device("cuda"),
             max_top_k=4,
@@ -218,7 +217,7 @@ def test_canonical_worker_enables_vocab_slice_before_first_forward(
             ConstraintMode.TABLE,
             ConstraintTableSpec(
                 enabled=True,
-                backend=ConstraintBackendKind.CUDA,
+                backend="cuda",
                 path=str(path),
                 artifact_digest=digest,
                 tokenizer_digest=table.metadata.tokenizer_digest,
@@ -339,7 +338,7 @@ def test_cuda_backend_scores_over_full_window_not_candidate_set(
     backend = load_constraint_backend(
         ConstraintTableSpec(
             enabled=True,
-            backend=ConstraintBackendKind.CUDA,
+            backend="cuda",
             path=str(path),
             artifact_digest=digest,
             tokenizer_digest="sha256:" + "b" * 64,
@@ -400,7 +399,7 @@ def test_cuda_execution_uses_loaded_table_token_window() -> None:
     from unittest.mock import MagicMock
 
     from vllm_gr.constraints.compiler import ConstraintTableCompiler
-    from vllm_gr.constraints.execution import CUDAConstrainedTopKExecution
+    from vllm_gr.constraints.cuda_execution import CUDAConstrainedTopKExecution
     from vllm_gr.constraints.json_compiler import compile_relations_json
 
     tokenizer = MagicMock()

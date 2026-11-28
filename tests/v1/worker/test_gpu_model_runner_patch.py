@@ -12,7 +12,7 @@ import torch
 from tests.helpers.gr_config import worker_config
 from vllm_gr.config import GRConfig
 from vllm_gr.v1.beam.dispatch import GRStageKind
-from vllm_gr.v1.worker import gr_context as _gr_context
+from vllm_gr.v1.worker.cuda import gr_context as _gr_context
 from vllm_gr.v1.worker.cuda.v1 import gpu_model_runner_patch as gpu_patch
 
 
@@ -668,10 +668,11 @@ def test_capture_beam_decode_graph_forwards_run_under_inference_mode(
 
     from vllm.v1.cudagraph_dispatcher import BatchDescriptor
 
+    from vllm_gr.v1.worker import gr_context as shared_context
     from vllm_gr.v1.worker.cuda import beam_decode_graph as shared
 
     monkeypatch.setattr(
-        _gr_context,
+        shared_context,
         "_get_gr_config",
         lambda _: SimpleNamespace(
             beam_graph_enabled=True,
@@ -758,7 +759,7 @@ def test_create_beam_context_uses_grconfig_params(device: str, enabled: bool | N
         device=torch.device(device),
     )
 
-    with patch("vllm_gr.v1.beam.attention_context.BeamAttentionContext") as MockCtx:
+    with patch("vllm_gr.v1.worker.cuda.attention_context.CudaBeamAttentionContext") as MockCtx:
         mock_instance = MagicMock()
         MockCtx.return_value = mock_instance
         gpu_patch._create_beam_context(runner, gr_cfg, max_batch=1)
@@ -790,7 +791,7 @@ def test_create_beam_context_dtype_from_model_config() -> None:
         device=torch.device("cpu"),
     )
 
-    with patch("vllm_gr.v1.beam.attention_context.BeamAttentionContext") as MockCtx:
+    with patch("vllm_gr.v1.worker.cuda.attention_context.CudaBeamAttentionContext") as MockCtx:
         MockCtx.return_value = MagicMock()
         gpu_patch._create_beam_context(runner, gr_cfg)
         call_kwargs = MockCtx.call_args[1]

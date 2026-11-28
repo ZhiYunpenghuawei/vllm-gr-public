@@ -75,7 +75,7 @@ gr:
 For the two-Trie example below, use `./regions.safetensors` as the path,
 `constraint_table_v2` as the format and the digests from the manifest build.
 `backend: auto` uses the canonical table implementation chosen by the GR
-platform. CUDA and Ascend ship with device implementations. A vendor plugin
+platform. CUDA ships with a device implementation. A vendor plugin
 can supply its own table backend. The CPU implementation serves as a
 reference. [Platform contract](../design/module/platform_backend.md#engine-plans)
 
@@ -147,13 +147,10 @@ for response fields.
 
 ## Device behavior and updates
 
-- CUDA and Ascend both select a Trie per prompt. On CUDA, combining catalogs
-  can widen the vocabulary window used for scoring and change rankings.
-  Ascend normalizes over the legal candidates at the current prefix. Raw
-  scores from the two backends can differ.
+- CUDA selects a Trie per prompt. Combining catalogs can widen the vocabulary
+  window used for scoring and change rankings.
 - CUDA asynchronous Beam serving supports online table replacement. The new
-  table must preserve the loaded Trie count and vocabulary projection. On
-  Ascend, restart the engine with the replacement table. Follow the
+  table must preserve the loaded Trie count and vocabulary projection. Follow the
   [catalog update guide](../user_guide/weight_update.md) for the CUDA procedure.
 
 For tensor layout, backend execution and compatibility, see the

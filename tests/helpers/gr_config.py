@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from vllm_gr.config import (
-    ConstraintBackendKind,
     ConstraintConfig,
     ConstraintMode,
     ConstraintTableSpec,
@@ -24,13 +23,10 @@ from vllm_gr.platforms.config import BackendConfigService
 
 def platform_config_service(device: str | None) -> BackendConfigService:
     """Supply native defaults for the platform simulated by an EngineArgs test."""
-    from tests.helpers.ascend_platform import AscendGRPlatform
     from tests.helpers.cuda_platform import CudaGRPlatform
 
     if device == "cuda":
         return CudaGRPlatform().create_config_service()
-    if device == "npu":
-        return AscendGRPlatform().create_config_service()
     return BackendConfigService()
 
 
@@ -38,13 +34,68 @@ def table_constraint(*, max_top_k: int = 128) -> ConstraintConfig:
     return ConstraintConfig(
         mode=ConstraintMode.TABLE,
         table=ConstraintTableSpec(
-            backend=ConstraintBackendKind.CUDA,
+            backend="cuda",
             path="/tmp/constraint_table.safetensors",
             max_top_k=max_top_k,
             artifact_digest="sha256:" + "a" * 64,
             tokenizer_digest="sha256:" + "b" * 64,
         ),
     )
+
+
+def admit_test_beam_limits(
+    host: Any,
+    *,
+    backend_id: str = "test",
+    device_type: str | None = "cuda",
+    constraint_backend: str | None = "cuda",
+    supports_unconstrained: bool = True,
+    supports_dynamic_width: bool = True,
+    supports_online_trie_reload: bool = True,
+    max_decode_rows: int | None = None,
+    retain_candidate_widths: bool = False,
+) -> Any:
+    """Publish explicitly selected host-test capabilities in the driver's wire format.
+
+    This fixture exercises frontend admission without discovering hardware.
+    Worker binding tests should instead use admit_backend_plan with a platform.
+    """
+    from vllm_gr.config.backend_plan import (
+        BACKEND_PLAN_KEY,
+        BackendPlan,
+        BackendRequest,
+        PlanData,
+    )
+    from vllm_gr.config.resolved_choices import ResolvedChoices
+
+    empty = PlanData({})
+    plan = BackendPlan(
+        backend_id,
+        BackendRequest(empty, empty, empty, empty),
+        PlanData(
+            {
+                "beam_limits": {
+                    "device_type": device_type,
+                    "max_decode_rows": max_decode_rows,
+                    "retain_candidate_widths": retain_candidate_widths,
+                    "constraint_backend": constraint_backend,
+                    "runner_generation": "v2"
+                    if getattr(host, "use_v2_model_runner", False)
+                    else "v1",
+                    "local_kv_heads": None,
+                    "head_size": None,
+                    "supports_unconstrained": supports_unconstrained,
+                    "supports_dynamic_width": supports_dynamic_width,
+                    "supports_online_trie_reload": supports_online_trie_reload,
+                }
+            }
+        ),
+    )
+    host.additional_config = {
+        **(getattr(host, "additional_config", None) or {}),
+        BACKEND_PLAN_KEY: ResolvedChoices.from_plan(plan).to_wire(),
+    }
+    return host
 
 
 def engine_args_from_file(tmp_path: Path, mapping: Mapping[str, object]) -> SimpleNamespace:
@@ -103,57 +154,6 @@ def set_deployment(host: SimpleNamespace, **options: object) -> None:
         config = replace(config, beam_max_width=128)
     deployment = DeploymentOptions.from_mapping({**config.deployment.to_mapping(), **options})
     host._vllm_gr_parsed_config = replace(config, deployment=deployment)
-
-
-def npu_dynamic_engine_args(
-    model: str,
-    artifact: Path,
-    artifact_digest: str,
-    tokenizer_digest: str,
-    *,
-    beam_width: int,
-    graph: bool,
-    explicit_widths: bool,
-) -> dict[str, Any]:
-    """Build the real NPU dynamic-beam ST startup arguments without device imports."""
-    config: dict[str, Any] = {
-        "prefill_graph_enabled": False,
-        "worker_decision": True,
-        "beam_width": [beam_width] * 3,
-        "max_decode_steps": 3,
-        "beam_graph_enabled": False,
-        "decode_graph_batch_size": 2,
-        "decode_graph_widths": [8, 16, 32],
-        "npu_decode_execution": "xllm",
-        "constraint_mode": "table",
-        "constraint_table": {
-            "backend": "npu",
-            "max_top_k": beam_width,
-            "path": str(artifact),
-            "format": "constraint_table_v1",
-            "digests": {"artifact": artifact_digest, "tokenizer": tokenizer_digest},
-        },
-        "candidate_width": [beam_width] * 3,
-    }
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        async_scheduling=True,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=False,
-        max_model_len=512,
-        max_num_batched_tokens=512,
-        max_num_seqs=64,
-        max_logprobs=beam_width,
-        gpu_memory_utilization=0.5,
-        worker_extension_cls="tests.e2e.test_npu_dynamic_beam_st.DynamicBeamTestWorkerExtension",
-    )
-    config["beam_graph_enabled"] = graph
-    if not explicit_widths:
-        config.pop("decode_graph_widths")
-    return dict(kwargs, gr=config, attention_config={"backend": "CUSTOM"}, enforce_eager=not graph)
 
 
 def serving_beam_engine_args(

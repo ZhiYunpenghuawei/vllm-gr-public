@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Contracts for the built-in CUDA and NPU integrations."""
+"""Contracts for the built-in CUDA integration."""
 
 from __future__ import annotations
 
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from unittest import mock
 
 import pytest
 
-from tests.helpers.ascend_platform import AscendGRPlatform
 from tests.helpers.cuda_platform import CudaGRPlatform
 
 cuda = CudaGRPlatform()
-npu = AscendGRPlatform()
 
 
 def test_cuda_integration_lazily_returns_platform_modules(
@@ -43,84 +41,35 @@ def test_cuda_integration_lazily_returns_platform_modules(
     ]
 
 
-def test_npu_integration_lazily_returns_platform_modules(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    npu_runner = object()
-    npu_attention = object()
-    imported: list[str] = []
-
-    def import_module(name: str) -> object:
-        imported.append(name)
-        return {
-            "vllm_gr.v1.worker.npu.npu_model_runner_patch": npu_runner,
-            "vllm_gr.v1.attention.backends.beam_attn_npu": npu_attention,
-        }[name]
-
-    monkeypatch.setattr(f"{AscendGRPlatform.__module__}.import_module", import_module)
-
-    assert npu.get_model_runner_hooks() is npu_runner
-    assert npu.get_attention_execution() is npu_attention
-    assert imported == [
-        "vllm_gr.v1.worker.npu.npu_model_runner_patch",
-        "vllm_gr.v1.attention.backends.beam_attn_npu",
-    ]
-
-
-@pytest.mark.l1  # type: ignore[misc]
-@pytest.mark.parametrize("mode", ["cascade", "xllm"])  # type: ignore[misc]
-def test_ascend_binding_uses_resolved_decode_implementation(
-    monkeypatch: pytest.MonkeyPatch, mode: str
-) -> None:
-    from vllm_gr.config.backend_plan import BackendPlan, BackendRequest, PlanData
-    from vllm_gr.platforms.ascend import decode
-
-    monkeypatch.setattr(
-        decode, "resolve_mode", lambda requested: mode if requested == "auto" else requested
-    )
-
-    def load(path: str) -> SimpleNamespace:
-        return SimpleNamespace(is_available=lambda: True, __name__=path)
-
-    monkeypatch.setattr(f"{AscendGRPlatform.__module__}.import_module", load)
-    empty = PlanData({})
-    for requested in ("cascade", "xllm", "auto"):
-        plan = BackendPlan(
-            npu.backend_id,
-            BackendRequest(empty, empty, empty, empty),
-            PlanData({"decode_attention": requested}),
-        )
-        selected = npu.create_attention_executor(plan=plan, device="npu")
-        expected = mode if requested == "auto" else requested
-        assert selected.__name__.endswith("npu_xllm" if expected == "xllm" else "attn_npu")
-
-
 def test_cuda_runtime_patch_is_noop() -> None:
     assert cuda.apply_runtime_patches() == 0
     assert cuda.apply_runtime_patches(force=True) == 0
 
 
-def test_npu_runtime_patches_preserve_order_and_sum_counts(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("field", "value"),
+    [
+        ("dense_prefill", "vendor"),
+        ("topk_select", "vendor"),
+        ("topk_keep", 257),
+        ("unconstrained_head_layout", "vendor"),
+        ("prefix_policy", "vendor"),
+        ("prefill_flash_attn_version", 4),
+    ],
+)
+def test_cuda_algorithm_choices_are_validated_at_backend_admission(
+    field: str, value: object
 ) -> None:
-    from vllm_gr.platforms.ascend import spawn_patch
-    from vllm_gr.v1.worker.npu import startup_patch
+    from vllm_gr.config import GRConfig
+    from vllm_gr.config.models import DeploymentOptions
 
-    events: list[tuple[str, bool | None]] = []
-
-    def apply_spawn() -> bool:
-        events.append(("spawn", None))
-        return True
-
-    def patch_worker() -> int:
-        events.append(("worker", None))
-        return 3
-
-    monkeypatch.setattr(startup_patch, "patch_npu_worker_init_device", patch_worker)
-    monkeypatch.setattr(spawn_patch, "apply_npu_spawn_patch", apply_spawn)
-
-    assert npu.apply_runtime_patches(force=True) == 4
-    assert events == [("spawn", None), ("worker", None)]
+    # The shared configuration parses data without selecting a device.
+    if field == "prefill_flash_attn_version":
+        config = GRConfig(prefill_flash_attn_version=value)
+    else:
+        config = GRConfig(deployment=DeploymentOptions.from_mapping({field: value}))
+    with pytest.raises(ValueError, match=field):
+        cuda.create_config_service().validate_engine(None, config)
 
 
 def test_cuda_environment_check_validates_platform_and_versions(

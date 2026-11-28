@@ -72,8 +72,6 @@ dev = [
 # the GPU-only GR dependencies even if setup.py metadata routing is bypassed.
 gpu = [
 ]
-# DEPRECATED: use `pip install -e .` — platform deps come from setup.py
-npu = []
 
 [project.urls]
 Homepage = "https://github.com/JiusiServe/vllm-gr"
@@ -115,7 +113,6 @@ markers = [
     "slow_test: alias of slow, kept for upstream naming consistency",
     "cpu_test: mark test as CPU-only test",
     "gpu_test: mark test as requiring a CUDA device",
-    "npu_test: mark test as requiring an Ascend NPU runtime",
     "model_test: mark test as requiring model weights",
     "network: mark test as requiring network access",
     # Also registered by tests/level_plugin.py. Listed here so entry points that

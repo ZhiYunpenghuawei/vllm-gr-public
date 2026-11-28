@@ -9,7 +9,6 @@ from typing import Any
 from vllm_gr.platforms.table import current_gr_platform
 from vllm_gr.v1.worker.prefill_graph_common import (
     DEFAULT_PREFILL_BUCKETS,
-    NPU_DEFAULT_PREFILL_BUCKETS,
     SUPPORTED_NUM_REQS,
     BasePrefillGraphRunner,
     PrefillBucketBuffers,
@@ -20,7 +19,6 @@ from vllm_gr.v1.worker.prefill_graph_common import (
 
 __all__ = [
     "DEFAULT_PREFILL_BUCKETS",
-    "NPU_DEFAULT_PREFILL_BUCKETS",
     "SUPPORTED_NUM_REQS",
     "BasePrefillGraphRunner",
     "BeamPrefillGraphRunner",

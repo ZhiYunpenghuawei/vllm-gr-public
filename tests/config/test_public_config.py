@@ -15,6 +15,7 @@ from tests.helpers.gr_config import table_constraint
 from vllm_gr.config import (
     ConstraintConfig,
     GRConfig,
+    constraint_backend_name,
     gr_config_from_mapping,
     gr_config_to_mapping,
     load_gr_config,
@@ -33,7 +34,7 @@ from vllm_gr.platforms.config import BackendConfigService
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
 
-@pytest.mark.parametrize("backend", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("backend", ["cuda"])  # type: ignore[misc]
 def test_decode_gate_configuration_reaches_public_loader(
     backend: str,
     tmp_path: Path,
@@ -57,23 +58,12 @@ def test_decode_gate_configuration_reaches_public_loader(
     exec(compile(producer, str(script), "exec"), {"__name__": "__main__"})
     config = load_gr_config(overrides=json.loads(capsys.readouterr().out))
     assert config.constraint is not None and config.constraint.table is not None
-    assert config.constraint.table.backend.value == backend
+    assert constraint_backend_name(config.constraint.table.backend) == backend
     assert config.constraint.table.artifact_digest == digests[0]
     assert config.constraint.table.tokenizer_digest == digests[1]
     assert config.beam_max_width == 128
     assert config.deployment.candidate_width == (128, 128, 128)
-    assert config.beam_graph_enabled is (backend == "cuda")
-
-
-def test_native_sid_stage_config_requires_explicit_worker_decision(tmp_path: Path) -> None:
-    path = tmp_path / "sid.yaml"
-    path.write_text(
-        "gr:\n  sid_stage_vocab: true\n  constraint_mode: none\n  worker_decision: null\n"
-    )
-    with pytest.raises(ValueError, match="worker_decision=True"):
-        load_gr_config(path)
-    config = load_gr_config(path, overrides={"worker_decision": True})
-    assert config.beam_sid_stage_vocab and config.beam_worker_decision is True
+    assert config.beam_graph_enabled is True
 
 
 def test_default_document_declares_every_public_option() -> None:
@@ -340,7 +330,7 @@ def test_step_widths_and_capacity(tmp_path: Path) -> None:
         ),
         ({"beam_width": [4], "candidate_width": [4], "result_width": 5}, "result_width"),
         ({"beam_width": 4, "candidate_width": 4}, "nonempty list"),
-        ({"dense_prefill": "flash"}, "gr.dense_prefill"),
+        ({"dense_prefill": 42}, "gr.dense_prefill"),
         ({"prefix_min_chain_us": -1}, "gr.prefix_min_chain_us"),
         ({"prefix_min_chain_us": float("nan")}, "gr.prefix_min_chain_us"),
     ],

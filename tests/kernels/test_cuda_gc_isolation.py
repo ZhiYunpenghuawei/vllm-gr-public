@@ -73,7 +73,7 @@ def test_automatic_gc_state_restored_after_gpu_case():
     assert gc.isenabled()
 
 
-def test_cpu_and_npu_requests_leave_gc_unchanged(monkeypatch):
+def test_non_cuda_requests_leave_gc_unchanged(monkeypatch):
     original = gc.isenabled()
     request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda _: None))
     fixture = isolate_cuda_graph_pool.__wrapped__(request)
@@ -81,7 +81,7 @@ def test_cpu_and_npu_requests_leave_gc_unchanged(monkeypatch):
     assert gc.isenabled() is original
     fixture.close()
     assert gc.isenabled() is original
-    monkeypatch.setattr(type(current_platform), "device_type", "npu")
+    monkeypatch.setattr(type(current_platform), "device_type", "cpu")
     request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda _: object()))
     fixture = isolate_cuda_graph_pool.__wrapped__(request)
     next(fixture)

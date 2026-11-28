@@ -46,7 +46,7 @@ class TestCascadeBeamAttentionGPUCollection(unittest.TestCase):
         pytest_stub = SimpleNamespace(skip=skip_module)
 
         # Execute the actual test module. The import sentinel must never be
-        # reached on CPU/NPU, but must remain a real failure on a CUDA runner.
+        # reached in a CPU-only test, but must remain a real failure on a CUDA runner.
         with (
             patch.dict(os.environ),
             patch.dict(sys.modules, {"pytest": pytest_stub, "torch": torch_stub}),
@@ -64,9 +64,9 @@ class TestCascadeBeamAttentionGPUCollection(unittest.TestCase):
         self.assertTrue(skipped.exception.allow_module_level)
         self.assertEqual(self.dependency_imports, [])
 
-    def test_explicit_npu_target_skips_even_when_cuda_is_available(self) -> None:
+    def test_explicit_cpu_target_skips_even_when_cuda_is_available(self) -> None:
         with self.assertRaises(_ModuleSkipped) as skipped:
-            self._execute_module(cuda_available=True, target_device="npu")
+            self._execute_module(cuda_available=True, target_device="cpu")
         self.assertTrue(skipped.exception.allow_module_level)
         self.assertEqual(self.dependency_imports, [])
 

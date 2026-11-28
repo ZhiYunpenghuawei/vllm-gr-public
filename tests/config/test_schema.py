@@ -16,6 +16,8 @@ from vllm_gr.config import (
     ConstraintTableSpec,
     GRConfig,
     gr_config_from_mapping,
+    gr_config_to_mapping,
+    load_gr_config,
     validation,
 )
 from vllm_gr.config.schema import ConfigFieldSpec, config_default, config_fields
@@ -87,7 +89,7 @@ def test_default_factory_values_are_not_shared() -> None:
     class FactoryConfig:
         sizes: list[int] = field(
             default_factory=list,
-            metadata={"gr": ConfigFieldSpec("validate_beam_graph_widths")},
+            metadata={"gr": ConfigFieldSpec("validate_beam_width")},
         )
 
     first = config_default(FactoryConfig, "sizes")
@@ -106,3 +108,32 @@ def test_config_import_keeps_device_runtime_unloaded() -> None:
         ],
         check=True,
     )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "key",
+    [
+        "sid_stage_vocab",
+        "decode_graph_widths",
+        "decode_graph_batch_size",
+        "npu_bsnd_capture_specs",
+        "npu_stage_lm_head",
+        "npu_decode_execution",
+    ],
+)
+def test_removed_ascend_config_keys_are_rejected(key: str) -> None:
+    with pytest.raises(ValueError, match="Unknown gr settings"):
+        gr_config_from_mapping({"gr": {key: None}})
+
+
+def test_concrete_constraint_backend_ids_are_configuration_data() -> None:
+    assert validation.validate_constraint_table_backend("vendor") == "vendor"
+    assert validation.validate_constraint_table_backend("CUDA") == "cuda"
+    with pytest.raises(ValueError, match="constraint_table.backend"):
+        validation.validate_constraint_table_backend(42)
+
+
+def test_common_default_config_round_trip_without_device_runtime() -> None:
+    config = load_gr_config()
+    assert config.beam_max_width == 128
+    assert gr_config_from_mapping(gr_config_to_mapping(config)) == config

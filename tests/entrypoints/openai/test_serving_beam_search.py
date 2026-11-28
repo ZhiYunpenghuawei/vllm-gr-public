@@ -151,8 +151,6 @@ def _run_gr_beam_search_target(loops: int) -> None:
 
     async def run_test() -> None:
         device = torch.cuda
-        if hasattr(torch, "npu") and torch.npu.is_available():
-            device = torch.npu
         await beam_search_test(loops)
         device.synchronize()
         before_gpu_mem: int = device.memory_allocated()

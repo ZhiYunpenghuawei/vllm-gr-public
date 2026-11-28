@@ -22,6 +22,7 @@ pytest.importorskip("smg_grpc_servicer", reason="install vllm-gr[grpc]")
 
 from google.protobuf import descriptor_pb2
 
+from tests.helpers.gr_config import admit_test_beam_limits
 from tests.v1.engine.test_gr_admission_queue import core as _admission_core_fixture
 from tests.v1.engine.test_gr_admission_queue import (
     scheduler as _admission_scheduler_fixture,
@@ -173,7 +174,7 @@ def test_full_request_to_numpy_batch(binary: bool) -> None:
 @pytest.mark.parametrize("binary", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize(  # type: ignore[misc]
     "backend,table_format,trie_id",
-    [("cuda", "constraint_table_v1", 0), ("npu", "constraint_table_v2", 1)],
+    [("cuda", "constraint_table_v1", 0), ("cuda", "constraint_table_v2", 1)],
 )
 def test_constrained_length_is_checked_before_grpc_token_decoding(
     binary: bool, backend: str, table_format: str, trie_id: int
@@ -189,6 +190,7 @@ def test_constrained_length_is_checked_before_grpc_token_decoding(
     runtime.vllm_config = SimpleNamespace(
         additional_config={"vllm_gr": config}, device_config=SimpleNamespace(device=backend)
     )
+    admit_test_beam_limits(runtime.vllm_config, device_type=backend, constraint_backend=backend)
     servicer = BeamVllmEngineServicer(runtime, 0.0)
     decode = Mock(wraps=servicer.decode_tokens)
     servicer.decode_tokens = decode
@@ -221,17 +223,6 @@ def test_per_input_trie_selector_wire_and_batch_mapping(binary: bool, trie_id: i
     assert batch.items[0].trie_id == (0 if trie_id is None else trie_id)
 
 
-@pytest.mark.parametrize("trie_id", [0, 1])  # type: ignore[misc]
-def test_npu_trie_selector_matches_http_validation(trie_id: int) -> None:
-    backend = engine()
-    backend.vllm_config = SimpleNamespace(device_config=SimpleNamespace(device="npu:0"))
-    request = message()
-    request.trie_id = trie_id
-    servicer = BeamVllmEngineServicer(backend, 0.0)
-    batch, _ = servicer.build_batch([request])
-    assert batch.items[0].trie_id == trie_id
-
-
 @pytest.mark.l1  # type: ignore[misc]
 @pytest.mark.parametrize("override_schedule", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize("override_result", [False, True])  # type: ignore[misc]
@@ -253,6 +244,7 @@ def test_grpc_beam_deployment_defaults(override_schedule: bool, override_result:
     runtime.vllm_config = SimpleNamespace(
         additional_config={"vllm_gr": config}, device_config=SimpleNamespace(device="cuda")
     )
+    admit_test_beam_limits(runtime.vllm_config)
     request = message()
     request.sampling_params.n = request.beam_search.beam_width = 4
     if override_schedule:
@@ -625,11 +617,14 @@ async def connection() -> AsyncIterator[tuple[Any, SimpleNamespace, list[Any], A
 
 @pytest.mark.parametrize("binary", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize("method", ["Generate", "GenerateBatch"])  # type: ignore[misc]
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 def test_trie_selection_over_grpc(binary: bool, method: str, device: str) -> None:
     async def run() -> None:
         async with connection() as (stub, backend, submitted, servicer):
             backend.vllm_config = SimpleNamespace(device_config=SimpleNamespace(device=device))
+            admit_test_beam_limits(
+                backend.vllm_config, device_type=device, constraint_backend=device
+            )
             if method == "Generate":
                 request = message(binary=binary)
                 request.trie_id = 1
@@ -654,7 +649,7 @@ def test_trie_selection_over_grpc(binary: bool, method: str, device: str) -> Non
 
 @pytest.mark.parametrize("trie_count", [1, 2])  # type: ignore[misc]
 @pytest.mark.parametrize("method", ["Generate", "GenerateBatch"])  # type: ignore[misc]
-@pytest.mark.parametrize("device", ["cuda", "npu"])  # type: ignore[misc]
+@pytest.mark.parametrize("device", ["cuda"])  # type: ignore[misc]
 def test_invalid_trie_uses_core_admission_and_service_recovers(
     trie_count: int, method: str, device: str
 ) -> None:
@@ -668,6 +663,9 @@ def test_invalid_trie_uses_core_admission_and_service_recovers(
     async def run() -> None:
         async with connection() as (stub, backend, submitted, servicer):
             backend.vllm_config = SimpleNamespace(device_config=SimpleNamespace(device=device))
+            admit_test_beam_limits(
+                backend.vllm_config, device_type=device, constraint_backend=device
+            )
             original_submit = backend.submit_gr_session
             core = SimpleNamespace(_gr_trie_count=trie_count, input_queue=Queue())
 

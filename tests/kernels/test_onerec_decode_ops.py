@@ -163,19 +163,23 @@ def test_group_torch_stable_parent_grouping() -> None:
     assert torch.equal(prefix[0], torch.tensor([0, 3, 3, 4], dtype=torch.int32))
 
 
-def test_group_torch_step0_matches_npu_observable_initialization() -> None:
+def test_group_torch_step0_selects_each_requests_initial_candidates() -> None:
     batch, beam, top_k = 2, 8, 8
     inputs = _group_inputs(batch, beam, 0, "cpu")
     token, parent, score, prefix, sequence = _beam_search_group_torch(*inputs, 0, top_k)
-    # Legacy kernel-initialization contract (verified on device): only the
-    # flat sequence rows [0, batch) receive their own row's first candidate.
-    expected = torch.zeros_like(sequence)
-    expected.reshape(-1, 1)[:batch, 0] = inputs[1][:batch, 0]
-    assert torch.equal(sequence, expected)
-    assert torch.count_nonzero(token) == 0
-    assert torch.count_nonzero(parent) == 0
-    assert torch.count_nonzero(score) == 0
-    assert torch.count_nonzero(prefix) == 0
+    cumulative, candidates, candidate_scores, _ = inputs
+    first_parent_scores = (
+        cumulative.reshape(batch, beam, 1)[:, 0] + candidate_scores.reshape(batch, beam, beam)[:, 0]
+    )
+    order = torch.argsort(first_parent_scores, dim=1, descending=True, stable=True)
+    expected_tokens = candidates.reshape(batch, beam, beam)[:, 0].gather(1, order)
+    request_base = torch.arange(batch, dtype=torch.int32)[:, None] * beam
+    assert torch.equal(token, expected_tokens)
+    assert torch.equal(parent, request_base.expand_as(parent))
+    torch.testing.assert_close(score, first_parent_scores.gather(1, order), rtol=0, atol=0)
+    assert torch.equal(prefix, (request_base + top_k).expand_as(prefix))
+    assert torch.equal(sequence[:, :, 0], token)
+    assert torch.count_nonzero(sequence[:, :, 1:]) == 0
 
 
 def test_group_torch_preserves_fixed_sequence_extent() -> None:

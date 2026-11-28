@@ -5,7 +5,7 @@ Offline inference searches the full vocabulary using the model and tokenizer.
 
 ## Prerequisites
 
-- A [CUDA](installation/gpu.md) or [Ascend](installation/npu.md) installation.
+- A [CUDA installation](installation/gpu.md).
 - A local OneRec-1.7B snapshot, or the Hugging Face CLI to download it.
 
 ## Offline inference
@@ -24,13 +24,6 @@ hf download OpenOneRec/OneRec-1.7B --local-dir "$ONEREC_MODEL"
 
 ```bash
 python examples/offline_inference/beam_search/quickstart.py --model "$ONEREC_MODEL"
-```
-
-### Ascend
-
-```bash
-python examples/offline_inference/beam_search/quickstart.py \
-  --model "$ONEREC_MODEL" --constraint-backend npu --execution eager
 ```
 
 ### Expected output

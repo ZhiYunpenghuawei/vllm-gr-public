@@ -11,7 +11,6 @@ import pytest
 import regex as re
 import yaml
 
-from tests.helpers.ascend_platform import AscendGRPlatform
 from tests.helpers.native_platform import native_platform
 
 
@@ -47,14 +46,9 @@ def test_patch_inventories_are_aligned_and_complete() -> None:
         assert f"Scope: `{patch['scope']}`; backend ID: `{backend_id}`" in section
 
 
-class _SyntheticAscendPlatform(AscendGRPlatform.native_platform_type):
-    pass
-
-
 @pytest.mark.l1
-@pytest.mark.parametrize("backend_id", ["cuda", "ascend"])
 def test_common_and_selected_platform_patch_ownership_is_unique(
-    monkeypatch: pytest.MonkeyPatch, backend_id: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vllm.platforms
 
@@ -65,17 +59,13 @@ def test_common_and_selected_platform_patch_ownership_is_unique(
     patches = inventory["patches"]
     assert all(
         (p["scope"] == "core" and p["backend_id"] is None)
-        or (p["scope"] == "backend" and p["backend_id"] in {"cuda", "ascend"})
+        or (p["scope"] == "backend" and p["backend_id"] == "cuda")
         for p in patches
     )
-    platforms = {
-        "cuda": native_platform("CUDA", "cuda"),
-        "ascend": _SyntheticAscendPlatform(),
-    }
-    monkeypatch.setattr(vllm.platforms, "current_platform", platforms[backend_id])
+    monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("CUDA", "cuda"))
     integration = current_gr_platform()
     core_ids = {p["id"] for p in patches if p["scope"] == "core"}
-    backend_ids = {p["id"] for p in patches if p["backend_id"] == backend_id}
+    backend_ids = {p["id"] for p in patches if p["backend_id"] == "cuda"}
     assert set(CORE_PATCH_IDS) == core_ids
     assert set(integration.patch_ids) == backend_ids
     claimed = (*CORE_PATCH_IDS, *integration.patch_ids)

@@ -47,7 +47,6 @@ class BeamTensorContext:
     block_size: int
     fixed_buffers: bool
     is_cuda: bool
-    is_npu: bool
     cache: dict
     buffers: BeamTensorBuffers
     num_heads_q: int = 0
@@ -68,7 +67,6 @@ def _get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
 def cached_seqlens_views(
     ctx: BeamTensorContext,
     geom_key,
-    *,
     n_pk: int,
     n_pc: int,
     n_sk: int,
@@ -148,7 +146,6 @@ def upload_incremental_seqlens(
                 (prefix_cu_seqlens_q_view, [0] + list(prefix_cu_seqlens_q_cpu)),
                 (suffix_cu_seqlens_q_view, [0] + list(suffix_cu_seqlens_q_cpu)),
             ],
-            non_blocking=ctx.is_npu,
         )
         uploaded.add(geom_key)
 
@@ -214,8 +211,6 @@ def get_schedule(
 def pack_int32_to_dev(
     ctx: BeamTensorContext,
     entries: list[tuple[Any, list[int]]],
-    *,
-    non_blocking: bool = False,
 ) -> None:
     """Write several small host int lists to device in ONE H2D.
 
@@ -245,19 +240,10 @@ def pack_int32_to_dev(
     np_dtype = np.int32 if h2d_host.dtype == torch.int32 else np.int64
     segments = [np.asarray(hl, dtype=np_dtype) for _dst, hl in entries]
     packed = np.concatenate(segments) if len(segments) > 1 else segments[0]
-    if non_blocking:
-        # A first NPU Beam geometry must not drain the preceding Prefill and
-        # TopK before the rest of Decode preparation can be submitted. Do not
-        # reuse h2d_host here: a following request could overwrite it before
-        # this asynchronous H2D has consumed the payload. The pinned allocator
-        # tracks the copy and delays recycling this independent allocation
-        # until its transfer has completed.
-        host = torch.empty(total, dtype=h2d_host.dtype, pin_memory=True)
-    else:
-        host = h2d_host[:total]
+    host = h2d_host[:total]
     host.copy_(torch.from_numpy(packed))
     # Single host -> device transfer for the whole payload.
-    h2d_dev[:total].copy_(host, non_blocking=non_blocking)
+    h2d_dev[:total].copy_(host)
 
     off = 0
     for dst, host_list in entries:
@@ -352,10 +338,7 @@ def create_std_tensors(
                 std_seqlens_kv_cpu, dtype=torch.int32, device=device
             )
         else:
-            # NPU: npu_fused_infer_attention_score_v2 currently reads CPU lists
-            # (std_cu_seqlens_q_cpu / std_seqlens_kv_cpu).
-            # TODO(ACL-graph): switch NPU to device tensors so this branch
-            # disappears and seqlens handling is unified.
+            # Non-CUDA harnesses use host length lists.
             std_cu_seqlens_q_device = None
             std_seqlens_kv_device = None
 
@@ -476,18 +459,7 @@ def create_beam_tensors(
         copied = ctx.cache.setdefault("block_table_copied", set())
         if geom_key is None or geom_key not in copied:
             source = common_attn_metadata.block_table_tensor
-            if (
-                ctx.is_npu
-                and geom_key is not None
-                and all(row == index for index, row in enumerate(prefix_req_idxs_cpu))
-            ):
-                # A request-major incremental batch already has its
-                # prefix blocks in this order. Basic slicing avoids the
-                # implicit CPU index tensor upload of list indexing, so
-                # first Decode preparation can continue during Prefill.
-                source = source[: len(prefix_req_idxs_cpu), :max_prefix_blocks_count]
-            else:
-                source = source[prefix_req_idxs_cpu, :max_prefix_blocks_count]
+            source = source[prefix_req_idxs_cpu, :max_prefix_blocks_count]
             prefix_block_table[:, :max_prefix_blocks_count].copy_(source)
             if geom_key is not None:
                 copied.add(geom_key)
@@ -590,10 +562,7 @@ def create_beam_tensors(
             [0] + suffix_cu_seqlens_kv_cpu, dtype=torch.int32, device=device
         )
     else:
-        # NPU: npu_fused_infer_attention_score_v2 currently reads
-        # CPU lists (prefix_cu_seqlens_q_cpu / suffix_cu_seqlens_q_cpu etc.).
-        # TODO(ACL-graph): switch NPU to device tensors so this
-        # branch disappears and seqlens handling is unified.
+        # Non-CUDA harnesses use host length lists.
         prefix_seqlens_kv_device = None
         prefix_cu_seqlens_q_device = None
         suffix_seqlens_kv_device = None

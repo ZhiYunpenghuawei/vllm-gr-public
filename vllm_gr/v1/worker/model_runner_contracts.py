@@ -6,8 +6,8 @@ from typing import Any
 
 _WORKER_EXECUTE_PATCH_MARKER = "_vllm_gr_beam_execute_patch"
 _WORKER_PREPARE_PATCH_MARKER = "_vllm_gr_beam_prepare_patch"
-# Optional: only installed when the runner exposes ``_sample`` (NPU builds may
-# not).  is_worker_runner_patched() deliberately does not require it.
+# Optional: only installed when the runner exposes ``sample_tokens``.
+# is_worker_runner_patched() deliberately does not require it.
 _WORKER_SAMPLE_TOKENS_PATCH_MARKER = "_vllm_gr_beam_sample_tokens_patch"
 _WORKER_DETERMINE_PATCH_MARKER = "_vllm_gr_beam_determine_patch"
 _WORKER_CAPTURE_PATCH_MARKER = "_vllm_gr_beam_capture_patch"
@@ -33,7 +33,7 @@ _CONSTRAINT_SHUTDOWN_PATCH_MARKER = "_vllm_gr_constraint_shutdown_patched"
 def is_worker_runner_v2_patched(runner_class: Any) -> bool:
     """Return whether all grouped-beam hooks are present on a V2 runner class.
 
-    The V2 runner (``vllm.v1.worker.gpu.model_runner.GPUModelRunner``) exposes
+    The V2 runner exposes
     ``sample_tokens`` instead of the V1 ``_bookkeeping_sync`` surface. The
     required V2 method set is the slim ``execute_model`` and ``sample_tokens``
     stage bypass plus the canonical Constraint Backend load/shutdown markers.
@@ -58,11 +58,8 @@ def is_worker_runner_patched(runner_class: Any) -> bool:
     Dispatches between the V1 and V2 method surfaces: the V2 runner has a
     ``prepare_inputs`` method and no ``_prepare_inputs``.
 
-    The ``_determine_batch_execution_and_padding`` hook stamps the beam
-    determine marker on all V1 platforms.  On GPU it overrides the dispatch
-    result to force FULL CUDA Graph for beam decode; on NPU it is a no-op
-    wrapper that preserves the original result — but the marker must still
-    be present for the gate-check to pass.
+    When the native runner exposes ``_determine_batch_execution_and_padding``,
+    its platform must install a marked Beam-aware hook.
     """
     if hasattr(runner_class, "prepare_inputs") and not hasattr(runner_class, "_prepare_inputs"):
         return is_worker_runner_v2_patched(runner_class)

@@ -15,14 +15,14 @@ from vllm_gr.v1.beam.execution_batch import (
     BeamBatchExecutionView,
     BeamExecutionContractError,
 )
-from vllm_gr.v1.worker.cuda.runner_installer import V1_RUNNER
-from vllm_gr.v1.worker.cuda.v1.gpu_prefill_inputs import try_prepare_gr_prefill_inputs
-from vllm_gr.v1.worker.gr_context import (
+from vllm_gr.v1.worker.cuda.gr_context import (
     _beam_full_graph_ready,
     _beam_graph_enabled_for_run,
     _create_beam_context,
     _get_gr_config,
 )
+from vllm_gr.v1.worker.cuda.runner_installer import V1_RUNNER
+from vllm_gr.v1.worker.cuda.v1.gpu_prefill_inputs import try_prepare_gr_prefill_inputs
 
 # Shared context helpers and installation contracts have independent owners.
 from vllm_gr.v1.worker.model_runner_contracts import (
@@ -98,7 +98,7 @@ def make_patched_determine_batch_execution_and_padding_gpu(_orig_determine):
     ``dispatch_cudagraph(disable_full=True)`` — preventing FULL CUDA Graph
     capture.  For beam search decode, we override the result to force
     ``CUDAGraphMode.FULL`` with ``uniform_decode=True``, the same explicit
-    override the vllm-GR ACL Graph integration applies for beam decode.
+    override needed for fixed-width Beam Decode.
 
     This patch is the single entry point that enables CUDA Graph capture
     for beam decode: all downstream logic (CUDAGraphWrapper lazy capture
@@ -497,7 +497,7 @@ def capture_beam_decode_graph(runner) -> bool:
 
 
 def discover_worker_runners() -> tuple[tuple[str, type], ...]:
-    """Discover the upstream GPU ModelRunner without importing NPU runtime."""
+    """Discover the upstream GPU ModelRunner lazily."""
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except ImportError as exc:
@@ -724,6 +724,10 @@ def is_patched(runner_class: type) -> bool:
 
 def install() -> None:
     """Install CUDA Worker utilities and the V1 native runner wrappers."""
+    from vllm_gr.v1.worker.cuda.constraint_projection import (
+        prepare_cuda_constraint_projection,
+        prepare_cuda_model,
+    )
     from vllm_gr.v1.worker.cuda.gpu_beam_stage_runner import make_cuda_stage_binding
     from vllm_gr.v1.worker.cuda.gpu_postprocess_workspace import (
         make_load_model_with_beam_postprocess_workspace,
@@ -742,6 +746,8 @@ def install() -> None:
     install_v1_worker_hooks(
         sys.modules[__name__],
         workspace_load_patcher=make_load_model_with_beam_postprocess_workspace,
+        prepare_model=prepare_cuda_model,
+        prepare_backend=prepare_cuda_constraint_projection,
         implementation_id=V1_RUNNER,
         stage=make_cuda_stage_binding("cuda.v1", CudaStageHooksV1, capture),
     )

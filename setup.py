@@ -5,7 +5,7 @@ Setup script for vllm-gr with hardware-dependent installation.
 
 This setup.py implements platform-aware dependency routing so users can run
 `pip install vllm-gr` and automatically receive the correct platform-specific
-dependencies (CUDA/NPU/CPU) without requiring extras like `[gpu]`.
+dependencies (CUDA/CPU) without requiring extras like `[gpu]`.
 """
 
 import logging
@@ -22,7 +22,7 @@ from setuptools_scm import get_version
 
 logger = logging.getLogger("vllm_gr.setup")
 
-_VALID_DEVICES = frozenset(("cuda", "npu", "cpu"))
+_VALID_DEVICES = frozenset(("cuda", "cpu"))
 VLLM_GR_BASE_VERSION = "0.30.0"
 ROOT_DIR = Path(__file__).resolve().parent
 _SCM_OVERRIDE = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM_GR"
@@ -34,9 +34,9 @@ _cached_device: str | None = None
 
 
 def warn_deprecated_extra_install() -> None:
-    """Warn when installing via deprecated [gpu] or [npu] extras."""
+    """Warn when installing via deprecated [gpu] extra."""
     argv = " ".join(sys.argv).lower()
-    for extra in ("[gpu]", "[npu]", ".[gpu", ".[npu"):
+    for extra in ("[gpu]", ".[gpu"):
         if extra in argv:
             warnings.warn(
                 f"Installing vllm-gr via the deprecated extra {extra!r} is "
@@ -56,9 +56,9 @@ def detect_target_device() -> str:
     Priority order:
     1. VLLM_GR_TARGET_DEVICE environment variable (highest priority)
     2. READTHEDOCS=1 -> cpu
-    3. Torch backend detection (cuda, npu)
+    3. Torch backend detection (cuda)
     4. No torch -> default cuda
-    5. Torch present but no GPU/NPU backend -> cpu
+    5. Torch present but no CUDA backend -> cpu
 
     The result is cached after the first call.
     """
@@ -72,9 +72,8 @@ def detect_target_device() -> str:
             logger.info("Using target device from VLLM_GR_TARGET_DEVICE: %s", target_device.lower())
             _cached_device = target_device.lower()
             return _cached_device
-        logger.warning(
-            "Invalid VLLM_GR_TARGET_DEVICE '%s', falling back to auto-detection",
-            target_device,
+        raise ValueError(
+            f"Unsupported VLLM_GR_TARGET_DEVICE {target_device!r}; expected cuda or cpu"
         )
 
     if os.environ.get("READTHEDOCS"):
@@ -90,16 +89,7 @@ def detect_target_device() -> str:
             _cached_device = "cuda"
             return _cached_device
 
-        if hasattr(torch, "npu"):
-            try:
-                if torch.npu.is_available():
-                    logger.info("Detected NPU backend from torch")
-                    _cached_device = "npu"
-                    return _cached_device
-            except Exception:
-                pass
-
-        logger.info("No GPU/NPU backend detected in torch, defaulting to CPU")
+        logger.info("No CUDA backend detected in torch, defaulting to CPU")
         _cached_device = "cpu"
         return _cached_device
 
@@ -115,7 +105,6 @@ def get_vllm_gr_version() -> str:
 
     Version format examples:
         - 0.30.0 (cuda, no suffix)
-        - 0.30.0+npu
         - 0.30.0+cpu
 
     Environment variables:
@@ -145,7 +134,7 @@ def get_vllm_gr_version() -> str:
 
         if device == "cuda":
             pass
-        elif device in ("npu", "cpu"):
+        elif device == "cpu":
             sep = "+" if "+" not in version else "."
             version += f"{sep}{device}"
         else:

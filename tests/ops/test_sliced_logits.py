@@ -15,7 +15,6 @@ from vllm_gr.ops.sliced_logits import (
     compute_sliced_logits,
     get_rank_vocab_bounds,
 )
-from vllm_gr.utils.npu_adapter import is_cuda_available
 
 
 @pytest.fixture(autouse=True)  # type: ignore[misc]
@@ -301,7 +300,7 @@ def test_native_logits_forward(
         UnquantizedEmbeddingMethod,
     )
 
-    if device == "cuda" and not is_cuda_available():
+    if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     torch.manual_seed(43)
     head = MockLMHead(384, 32).to(device=device, dtype=dtype)
@@ -435,7 +434,7 @@ def test_native_quantized_head_dtype_rejection() -> None:
 
 
 def test_v2_topk_clamp_reuses_an_already_wrapped_import() -> None:
-    from vllm_gr.v1.worker.sliced_logits_patch import _make_clamped_v2_topk
+    from vllm_gr.v1.worker.cuda.sliced_logits_patch import _make_clamped_v2_topk
 
     calls = []
 
@@ -464,9 +463,9 @@ def test_v2_compute_topk_scores_clamped_to_sliced_width(
     """Check all 0.30 importer bindings and score modes against dense results."""
     import importlib
 
-    from vllm_gr.v1.worker import sliced_logits_patch
+    from vllm_gr.v1.worker.cuda import sliced_logits_patch
 
-    if not is_cuda_available():
+    if not torch.cuda.is_available():
         pytest.skip("V2 score helper uses a Triton kernel (CUDA only)")
     # Load importers before installation too: existing bindings must be patched.
     modules = [
@@ -477,7 +476,7 @@ def test_v2_compute_topk_scores_clamped_to_sliced_width(
             "vllm.v1.worker.gpu.spec_decode.rejection_sampler",
         )
     ]
-    sliced_logits_patch.apply_sliced_logits_patch()
+    sliced_logits_patch.apply_cuda_v2_sliced_logits_patch()
     logits = torch.arange(3 * width, device="cuda", dtype=torch.float32).reshape(3, width) / 3
     sampled = torch.zeros(3, dtype=torch.int64, device="cuda")
     k = min(num_logprobs, width)

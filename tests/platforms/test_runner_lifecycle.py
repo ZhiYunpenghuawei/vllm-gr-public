@@ -13,6 +13,7 @@ from vllm_gr.config import GRConfig
 from vllm_gr.config.backend_plan import BackendPlan, BackendRequest, PlanData
 from vllm_gr.config.resolved_choices import ResolvedChoices
 from vllm_gr.platforms import table
+from vllm_gr.platforms.interface import GRPlatform
 from vllm_gr.platforms.planning import admit_backend_plan
 from vllm_gr.v1.engine.worker_readiness import worker_backend_readiness
 from vllm_gr.v1.worker import runner_binding as binding
@@ -35,6 +36,14 @@ def _plan(implementation: str) -> BackendPlan:
     empty = PlanData({})
     request = BackendRequest(empty, empty, empty, empty)
     return BackendPlan("test", request, PlanData({"runner": implementation}))
+
+
+def _mock_process_platform(monkeypatch: pytest.MonkeyPatch, **options: Any) -> Mock:
+    import vllm.platforms
+
+    implementation = Mock(spec=GRPlatform, **options)
+    monkeypatch.setattr(vllm.platforms, "current_platform", implementation)
+    return implementation
 
 
 @pytest.mark.parametrize("prepare", ["_prepare_inputs", "prepare_inputs"])  # type: ignore[misc]
@@ -112,7 +121,8 @@ def test_native_calls_use_the_owning_adapter_and_keep_late_completion(prepare: s
 def test_full_load_rebinds_the_same_plan_only_once_per_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    implementation = Mock(
+    implementation = _mock_process_platform(
+        monkeypatch,
         backend_id="test",
         vendor_distribution=None,
     )
@@ -151,7 +161,8 @@ def autofit_runner(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, BackendPl
     cleanup_module = ModuleType("vllm_gr.v1.worker.model_runner_patch")
     setattr(cleanup_module, "close_constraint_backend", Mock())
     monkeypatch.setitem(sys.modules, cleanup_module.__name__, cleanup_module)
-    implementation = Mock(
+    implementation = _mock_process_platform(
+        monkeypatch,
         backend_id="test",
         vendor_distribution=None,
     )
@@ -295,6 +306,7 @@ def test_autofit_does_not_hide_worker_plan_drift(
 def test_reload_preserves_live_generation_and_releases_failed_replacement(
     monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool
 ) -> None:
+    _mock_process_platform(monkeypatch)
     events: list[str] = []
     plan = _plan("native")
     previous = Mock()
@@ -345,6 +357,7 @@ def test_reload_preserves_live_generation_and_releases_failed_replacement(
 def test_first_load_cleans_partial_resources_before_a_binding_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_process_platform(monkeypatch)
     runner = SimpleNamespace(native_resource=None)
     native_resource = Mock()
     failure = ValueError("partial native load")
@@ -368,6 +381,28 @@ def test_first_load_cleans_partial_resources_before_a_binding_exists(
     native_resource.close.assert_called_once_with()
     close_table.assert_called_once_with(runner)
     assert runner.native_resource is None
+
+
+def test_uninstalled_platform_seam_rejects_model_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm.platforms
+
+    from tests.helpers.native_platform import native_platform
+
+    monkeypatch.setattr(vllm.platforms, "current_platform", native_platform("OOT", "foreign"))
+    cleanup_module = ModuleType("vllm_gr.v1.worker.model_runner_patch")
+    close_table = Mock()
+    setattr(cleanup_module, "close_constraint_backend", close_table)
+    monkeypatch.setitem(sys.modules, cleanup_module.__name__, cleanup_module)
+    native_load = Mock()
+    runner = SimpleNamespace()
+
+    def load(self: Any) -> None:
+        native_load(self)
+
+    with pytest.raises(RuntimeError, match="requires the GR platform as current_platform"):
+        bind_after_model_load(load)(runner)
+    native_load.assert_not_called()
+    close_table.assert_called_once_with(runner)
 
 
 @pytest.mark.parametrize("failure", [False, True])  # type: ignore[misc]
@@ -419,6 +454,9 @@ def test_stage_dispatch_uses_the_admitted_runner_generation(
     GRConfig(beam_max_width=16).write_to_vllm_config(config)
     plan = admit_backend_plan(config)
     assert plan is not None and plan.backend_id == "fakeaccel"
+    from vllm_gr.plugin import install_gr_platform
+
+    assert install_gr_platform(table.current_gr_platform())
     request = make_batch_request()
     validate_gr_device_config(config, request)
     validate_decode_token_budget(request, config)

@@ -46,9 +46,6 @@ Commands without the GR switch continue through vLLM's normal CLI.
 
 ## Help, versions, and diagnostics
 
-On Ascend, select ModelRunner V1 with `export VLLM_USE_V2_MODEL_RUNNER=0` before
-running the serve help commands.
-
 ```bash
 vllm --help                                      # Native command list
 vllm --version                                   # Native vLLM version
@@ -58,7 +55,6 @@ vllm bench --gr --help
 vllm bench --gr --list
 vllm bench qwen-v1 --gr --help
 vllm check-env --gr                               # Detect the runtime platform
-vllm check-env --gr --npu                         # Require Ascend NPU
 ```
 
 The benchmark list and GR top-level help do not import the serving command.

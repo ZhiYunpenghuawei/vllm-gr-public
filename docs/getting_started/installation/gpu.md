@@ -53,9 +53,7 @@ python -m pip check
 ```
 
 Shared dependencies come from `requirements/common.txt`, while CUDA adds the
-vLLM runtime from `requirements/cuda.txt`. There is no CUDA extra. The Ascend
-path is validated on the vLLM-Ascend 0.30.0rc2 vendor image; see the
-[Ascend installation guide](npu.md) before attempting an NPU environment.
+vLLM runtime from `requirements/cuda.txt`. There is no CUDA extra.
 
 If you have `uv` installed, you can use it with the same target and dependency
 contract.

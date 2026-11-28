@@ -22,7 +22,7 @@ class ConstraintBackendInfo:
     """Immutable construction and ownership diagnostics for one Backend."""
 
     table_metadata: ConstraintTableMetadata
-    backend: ConstraintBackendKind
+    backend: ConstraintBackendKind | str
     max_top_k: int
     max_rows: int
     host_memory_bytes: int
@@ -36,9 +36,8 @@ class ConstraintMetadata:
     ``temperatures`` is a caller-validated tensor of finite, non-negative
     values.  Zero has the established constrained-operator meaning of one:
     logits are left unscaled, rather than divided by zero. Positive values
-    scale logits before normalization. The CPU and CUDA Backends normalize
-    over the complete shared logits window so candidate scores are
-    comparable across parent rows.
+    scale logits before normalization over the complete shared logits window
+    so candidate scores are comparable across parent rows.
 
     Temperatures are validated at the request boundary. Checked Backend calls
     also validate root ID ranges, which synchronizes when IDs are on a device.

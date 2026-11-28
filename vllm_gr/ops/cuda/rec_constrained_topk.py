@@ -8,7 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm_gr.config.models import MAX_CONSTRAINT_CANDIDATE_WIDTH
 from vllm_gr.constraints.scoring import INVALID_LOGIT
 
 # Triton JIT functions intentionally use its untyped DSL values.
@@ -16,7 +15,7 @@ from vllm_gr.constraints.scoring import INVALID_LOGIT
 
 
 # Constraint-table kernels retain their independent output capacity.
-MAX_TOP_K = MAX_CONSTRAINT_CANDIDATE_WIDTH
+MAX_TOP_K = 256
 MAX_SORT_BLOCK = 65536
 
 

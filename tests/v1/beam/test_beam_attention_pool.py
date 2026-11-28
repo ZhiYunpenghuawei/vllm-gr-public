@@ -202,15 +202,4 @@ def test_cuda_pool_reset_preserves_addresses() -> None:
     _assert_accelerator_reset_contract(torch.device("cuda"))
 
 
-def _npu_is_available() -> bool:
-    npu = getattr(torch, "npu", None)
-    return npu is not None and bool(npu.is_available())
-
-
-@pytest.mark.npu_test  # type: ignore[misc]
-@pytest.mark.skipif(not _npu_is_available(), reason="NPU is not available")  # type: ignore[misc]
-def test_npu_pool_reset_preserves_addresses() -> None:
-    _assert_accelerator_reset_contract(torch.device("npu"))
-
-
 pytestmark = pytest.mark.cpu_test

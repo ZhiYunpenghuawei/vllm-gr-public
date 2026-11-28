@@ -10,13 +10,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
 
-from vllm_gr.config import ConstraintBackendKind
 from vllm_gr.config.models import runtime_constraint_table
 from vllm_gr.platforms.interface import ModelRunnerInstaller
-from vllm_gr.v1.worker.gr_context import (
-    _get_gr_config,
-    get_beam_graph_runtime_stats,
-)
+from vllm_gr.v1.worker.gr_context import _get_gr_config
 from vllm_gr.v1.worker.gr_gc import (
     freeze_gc_after_graph_capture,
     freeze_gc_after_warmup,
@@ -31,12 +27,9 @@ from vllm_gr.v1.worker.model_runner_contracts import (
 from vllm_gr.v1.worker.stage_binding import require_stage
 
 if TYPE_CHECKING:
-    from vllm_gr.constraints.cuda_backend import CUDAConstraintBackend
     from vllm_gr.v1.worker.stage_binding import StageBinding
 
 logger = init_logger(__name__)
-
-_BEAM_GRAPH_STATS_HOOK_MARKER = "_vllm_gr_beam_graph_stats_hook_installed"
 
 
 def close_constraint_backend(runner: object) -> None:
@@ -49,10 +42,6 @@ def close_constraint_backend(runner: object) -> None:
     # Detach first so no concurrent observer can discover a Backend while it is
     # being closed, and so repeated shutdown/load calls are naturally idempotent.
     setattr(runner, "constraint_backend", None)
-    projection = getattr(runner, "_gr_npu_stage_projection", None)
-    if projection is not None:
-        cast(Any, runner)._gr_npu_stage_projection = None
-        projection.close()
     for processor in getattr(runner, "_gr_vocab_slice_processors", ()):
         processor._gr_vocab_slice = None
     setattr(runner, "_gr_vocab_slice_processors", ())
@@ -69,9 +58,9 @@ def _remove_model_bytecode_hooks(runner: object) -> None:
     from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
     # vLLM 0.30 keeps each Dynamo RemovableHandle on its compile wrapper and
-    # exposes cleanup(). GPUModelRunner.shutdown drops self.model without
+    # exposes cleanup(). The native runner can drop self.model without
     # calling it, so release the callbacks before native shutdown. The model's
-    # modules() traversal also works through CUDAGraphWrapper.
+    # modules() traversal also works through native graph wrappers.
     for module in model.modules():
         if isinstance(module, TorchCompileWithNoGuardsWrapper):
             module.cleanup()
@@ -97,6 +86,7 @@ def make_load_model_with_constraint_backend(
     *,
     max_batch: int = 1,
     close_runtime: Any = None,
+    prepare_model: Callable[[Any], None] | None = None,
     prepare_backend: Callable[[Any, Any], None] | None = None,
 ) -> Any:
     """Load weights first, then atomically publish a ready canonical Backend."""
@@ -116,12 +106,10 @@ def make_load_model_with_constraint_backend(
         close_constraint_backend(self)
         # Validate the deployment before the native loader allocates model weights.
         GRConfig.from_vllm_config(getattr(self, "vllm_config", None))
-        parallel = getattr(getattr(self, "vllm_config", None), "parallel_config", None)
         result = original(self, *args, **kwargs)
 
-        from vllm_gr.v1.worker.lm_head_cache import install_lm_head_cache_reload_hooks
-
-        install_lm_head_cache_reload_hooks(self.model)
+        if prepare_model is not None:
+            prepare_model(self)
         backend = None
         try:
             gr_config = GRConfig.from_vllm_config(getattr(self, "vllm_config", None))
@@ -152,28 +140,13 @@ def make_load_model_with_constraint_backend(
 
             from vllm_gr.constraints.loader import load_constraint_backend
 
-            stage_options = {}
-            if (
-                table_config.backend is ConstraintBackendKind.NPU
-                and gr_config.beam_max_width is not None
-                and gr_config.beam_max_decode_steps <= 3
-            ):
-                from vllm_gr.v1.worker.npu.stage_projection import (
-                    can_install_npu_stage_projection,
-                )
-
-                # Check the loaded model before allocating compact tables.
-                if can_install_npu_stage_projection(self):
-                    stage_options["enable_npu_stage_vocab"] = True
-                    stage_options["stage_lm_head"] = gr_config.deployment.npu_stage_lm_head
             backend = load_constraint_backend(
                 config=table_config,
                 device=getattr(self, "device", None),
                 vocab_size=_runner_vocab_size(self),
                 dtype=getattr(getattr(self, "model_config", None), "dtype", None),
-                # NPU V1 and CUDA V2 opt into batched sampling.
+                # Batched sampling is enabled by the bound runner.
                 max_rows=max_batch * max_rows,
-                **stage_options,
             )
             if backend is None:
                 raise RuntimeError("enabled canonical constraint table loader returned no Backend")
@@ -181,42 +154,6 @@ def make_load_model_with_constraint_backend(
             model_memory_usage = int(getattr(self, "model_memory_usage", 0))
             self.model_memory_usage = model_memory_usage + backend.info.device_memory_bytes
 
-            if getattr(backend.info, "backend", None) is ConstraintBackendKind.CUDA:
-                # Import GPU layers only after selecting the CUDA backend.
-                from vllm.model_executor.layers.logits_processor import LogitsProcessor
-
-                cuda_backend = cast("CUDAConstraintBackend", backend)
-                window = cuda_backend.vocab_slice
-                if getattr(parallel, "tensor_parallel_size", 1) != 1:
-                    # All ranks must retain the original full-logits collective path.
-                    window = None
-                    cuda_backend.vocab_slice = None
-                    logger.info(
-                        "vllm-gr: canonical CUDA vocabulary slicing disabled for TP>1; "
-                        "using full-vocabulary projection"
-                    )
-                if window == (0, _runner_vocab_size(self)):
-                    window = None  # No benefit from cloning the entire LM head.
-                processors = tuple(
-                    module for module in self.model.modules() if isinstance(module, LogitsProcessor)
-                )
-                for processor in processors:
-                    # Explicit None also overrides unrelated legacy global settings.
-                    processor._gr_vocab_slice = window
-                self._gr_vocab_slice_processors = processors
-            elif (
-                getattr(backend.info, "backend", None) is ConstraintBackendKind.NPU
-                and getattr(backend, "stage_vocab", None) is not None
-            ):
-                # Keep NPU projection imports isolated from CPU/CUDA startup.
-                from vllm_gr.v1.worker.npu.stage_projection import (
-                    install_npu_stage_projection,
-                )
-
-                projection = install_npu_stage_projection(self, backend)
-                if projection is not None:
-                    self._gr_npu_stage_projection = projection
-                    self.model_memory_usage += projection.device_memory_bytes
             from vllm_gr.v1.worker.hot_update import versioned_constraint_table
 
             # Publish only after readiness and runner-specific kernel warmup.
@@ -225,10 +162,6 @@ def make_load_model_with_constraint_backend(
             )
             return result
         except BaseException:
-            projection = getattr(self, "_gr_npu_stage_projection", None)
-            if projection is not None:
-                self._gr_npu_stage_projection = None
-                projection.close()
             if backend is not None:
                 backend.close()
             self.constraint_backend = None
@@ -289,16 +222,11 @@ def is_active_worker_runner_patched(runner_class: type) -> bool:
 
 
 def install_worker_utility_hooks(worker_cls: type) -> None:
-    """Install named utility RPCs shared by CUDA and NPU Worker classes."""
+    """Install named utility RPCs shared by native Worker classes."""
     from vllm_gr.v1.worker.hot_update import install_worker_hot_update_hooks
 
     install_worker_hot_update_hooks(worker_cls)
-    if not getattr(worker_cls, _BEAM_GRAPH_STATS_HOOK_MARKER, False):
-        # Utility RPC dispatch resolves named Worker methods. Keep these
-        # importable functions instead of relying on callable serialization.
-        worker_cls.get_gr_beam_graph_runtime_stats = get_beam_graph_runtime_stats  # type: ignore[attr-defined]
-        worker_cls.gr_freeze_gc_after_warmup = freeze_gc_after_warmup  # type: ignore[attr-defined]
-        setattr(worker_cls, _BEAM_GRAPH_STATS_HOOK_MARKER, True)
+    worker_cls.gr_freeze_gc_after_warmup = freeze_gc_after_warmup  # type: ignore[attr-defined]
 
 
 def apply_worker_patches() -> None:
@@ -314,6 +242,8 @@ def install_v1_worker_hooks(
     *,
     workspace_load_patcher: Callable[..., Any] | None = None,
     constraint_max_batch: int = 1,
+    prepare_model: Callable[[Any], None] | None = None,
+    prepare_backend: Callable[[Any, Any], None] | None = None,
     implementation_id: str | None = None,
     stage: StageBinding | None = None,
 ) -> None:
@@ -337,7 +267,10 @@ def install_v1_worker_hooks(
         load_model = getattr(runner_class, "load_model", None)
         if callable(load_model) and not getattr(load_model, _CONSTRAINT_LOAD_PATCH_MARKER, False):
             runner_class.load_model = make_load_model_with_constraint_backend(
-                load_model, max_batch=constraint_max_batch
+                load_model,
+                max_batch=constraint_max_batch,
+                prepare_model=prepare_model,
+                prepare_backend=prepare_backend,
             )
 
         platform_load_patcher = getattr(platform_module, "make_patched_load_model", None)
@@ -391,6 +324,7 @@ def install_v1_worker_hooks(
         # beam_max_width configured and not disabled; no-op otherwise).
         beam_capture = getattr(platform_module, "capture_beam_decode_graph", None)
         prefill_capture = getattr(platform_module, "capture_prefill_graphs", None)
+        recoverable_capture_error = getattr(platform_module, "is_recoverable_capture_error", None)
         if (
             (beam_capture is not None or prefill_capture is not None)
             and hasattr(runner_class, "capture_model")
@@ -402,6 +336,7 @@ def install_v1_worker_hooks(
                 _orig: Callable[..., Any],
                 _beam_capture: Callable[..., Any] | None,
                 _prefill_capture: Callable[..., Any] | None,
+                _recoverable: Callable[[RuntimeError], bool] | None,
             ) -> Callable[..., Any]:
                 @wraps(_orig)
                 def patched_capture_model(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -412,13 +347,11 @@ def install_v1_worker_hooks(
                         try:
                             _beam_capture(self)
                         except Exception as error:
-                            from vllm_gr.v1.worker.cudagraph_capture import (
-                                is_recoverable_capture_error,
-                            )
-
-                            if not isinstance(
-                                error, RuntimeError
-                            ) or not is_recoverable_capture_error(error):
+                            if (
+                                not isinstance(error, RuntimeError)
+                                or _recoverable is None
+                                or not _recoverable(error)
+                            ):
                                 raise
                             logger.exception(
                                 "vllm-gr: beam decode graph dummy capture failed; "
@@ -428,19 +361,17 @@ def install_v1_worker_hooks(
                         try:
                             _prefill_capture(self)
                         except Exception as error:
-                            from vllm_gr.v1.worker.cudagraph_capture import (
-                                is_recoverable_capture_error,
-                            )
-
-                            if not isinstance(
-                                error, RuntimeError
-                            ) or not is_recoverable_capture_error(error):
+                            if (
+                                not isinstance(error, RuntimeError)
+                                or _recoverable is None
+                                or not _recoverable(error)
+                            ):
                                 raise
                             logger.exception(
                                 "vllm-gr: prefill graph capture failed; "
                                 "prefill will fall back to eager"
                             )
-                    # All CUDA graphs (native + beam + prefill) are now captured
+                    # All native and GR graphs are now captured
                     # and the serving-time heap is fully built.  Freeze it so the
                     # long-lived post-startup objects (KV caches, captured graph
                     # state, beam sessions) are not rescanned by gen-1/gen-2 GC
@@ -450,11 +381,13 @@ def install_v1_worker_hooks(
 
                 return patched_capture_model
 
-            patched = make_patched_capture_model(_orig_capture_model, beam_capture, prefill_capture)
+            patched = make_patched_capture_model(
+                _orig_capture_model, beam_capture, prefill_capture, recoverable_capture_error
+            )
             setattr(patched, _WORKER_CAPTURE_PATCH_MARKER, True)
             runner_class.capture_model = patched
 
-        # Patch _determine_batch_execution_and_padding to force FULL CUDA Graph
+        # Patch _determine_batch_execution_and_padding to force FULL graph
         # for beam decode steps (if the platform module provides it).
         determine_patcher = getattr(
             platform_module, "make_patched_determine_batch_execution_and_padding", None

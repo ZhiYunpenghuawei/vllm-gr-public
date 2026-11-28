@@ -9,13 +9,9 @@ its defining submodule (``vllm_gr.utils.accelerator`` etc.).
 """
 
 from vllm_gr.utils.accelerator import (
-    is_cuda_available,
-    is_npu_available,
     release_accelerator_memory,
 )
 
 __all__ = [
-    "is_cuda_available",
-    "is_npu_available",
     "release_accelerator_memory",
 ]

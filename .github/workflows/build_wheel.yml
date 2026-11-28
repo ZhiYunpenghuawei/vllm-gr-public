@@ -48,7 +48,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
-        target-device: ["cpu", "cuda", "npu"]
+        target-device: ["cpu", "cuda"]
 
     steps:
       - uses: actions/checkout@v4

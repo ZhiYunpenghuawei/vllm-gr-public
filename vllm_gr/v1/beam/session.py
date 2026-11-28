@@ -46,7 +46,7 @@ class BeamSearchSession:
         """Start a beam search session. Resets slot state (lazy KV reset).
 
         ``decision_index`` selects a physical decision row for the independent
-        CUDA runner; it need not equal the KV slot. Omission preserves the
+        runner; it need not equal the KV slot. Omission preserves the
         legacy full-buffer reset. Persistent state must be reset separately,
         after final consumers, before its next Prefill initialization.
 
@@ -87,29 +87,11 @@ class BeamSearchSession:
         """
         state = self._state
         if not state.is_last_step:
-            from vllm_gr.v1.beam.reorder import reorder_unshared_kv
-
-            # Hand the context's PER-LAYER [num_layers, ...] aux buffers to the
-            # reorder dispatcher.  In cascade mode the fused Triton path uses
-            # the whole tensor for its single all-layer launch; the per-layer
-            # reference slices it with [layer]; xllm reorders in place and
-            # ignores aux.
-            aux_key = getattr(self.context, "aux_key_buf", None)
-            aux_value = getattr(self.context, "aux_value_buf", None)
-            pool_key_ptrs = getattr(self.context, "pool_key_ptrs", None)
-            pool_value_ptrs = getattr(self.context, "pool_value_ptrs", None)
-
-            reorder_unshared_kv(
+            self.context.reorder(
                 parent,
                 self.slot,
-                self.context.pools,
                 state.decode_step,
-                aux_key=aux_key,
-                aux_value=aux_value,
-                pool_key_ptrs=pool_key_ptrs,
-                pool_value_ptrs=pool_value_ptrs,
                 layout_prevalidated=layout_prevalidated,
-                decode_mode=self.context.decode_mode,
             )
         state.decode_step += 1
 

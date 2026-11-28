@@ -156,7 +156,7 @@ def resolve_prefill_flash_attn_version(
     quantized KV and special attention features need separate qualification.
     Explicit requests fail early instead of silently benchmarking a fallback.
     """
-    from vllm_gr.config.validation import validate_prefill_flash_attn_version
+    from vllm_gr.platforms.cuda.config import validate_prefill_flash_attn_version
 
     validate_prefill_flash_attn_version(requested)
     if requested is None or requested == decode_version:
@@ -363,9 +363,8 @@ def prefill_attention(
     assert cu_seqlens_q is not None, "query_start_loc must not be None for prefill attention"
     assert seqused_k is not None, "seq_lens must not be None for prefill attention"
 
-    # Compute only the real rows: FA2 silently ignores query rows beyond
-    # cu_seqlens_q[-1], but slicing keeps the fast path aligned with the NPU
-    # FIA convention (queryT == last(actual_seq_qlen)).
+    # Compute only the real rows, excluding any graph-padding rows beyond
+    # cu_seqlens_q[-1].
     num_actual_tokens = getattr(attn_metadata, "num_actual_tokens", query.shape[0])
     query = query[:num_actual_tokens]
 

@@ -67,10 +67,6 @@ def test_resource_integration_checks_actual_released_pids(
         cd "$1" || exit 1
         target_pid=$2 target_state=$3
         export CUDA_VISIBLE_DEVICES=3,5
-        command() {
-            if [[ ${1:-} == -v && ${2:-} == npu-smi ]]; then return 1; fi
-            builtin command "$@"
-        }
         nvidia-smi() { echo 6; }
         python3() { :; }
         sleep() { :; }
@@ -107,20 +103,15 @@ def test_resource_integration_checks_actual_released_pids(
 
 
 @pytest.mark.parametrize("plural", [False, True])  # type: ignore[misc]
-@pytest.mark.parametrize("npu", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize("mask", ["0,invalid", "0,", "", "99"])  # type: ignore[misc]
-def test_invalid_visibility_returns_no_ids(npu: bool, plural: bool, mask: str) -> None:
+def test_invalid_visibility_returns_no_ids(plural: bool, mask: str) -> None:
     result = run_shell(
         """
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=$1
         nvidia-smi() { echo 4; }
         is_available() { return 0; }
-        is_available_npu() { return 0; }
-        CUDA_VISIBLE_DEVICES=$2 ASCEND_RT_VISIBLE_DEVICES=$2 "$3" 1 1
+        CUDA_VISIBLE_DEVICES=$1 "$2" 1 1
         """,
-        str(npu).lower(),
         mask,
         "get_gpus" if plural else "get_gpu",
     )
@@ -128,47 +119,37 @@ def test_invalid_visibility_returns_no_ids(npu: bool, plural: bool, mask: str) -
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize("npu", ["true", "false"])  # type: ignore[misc]
-def test_ordered_visible_intersection_and_timeout(npu: str) -> None:
+def test_ordered_visible_intersection_and_timeout() -> None:
     result = run_shell(
         """
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=$1
         nvidia-smi() { echo 4; }
         is_available() { return 0; }
-        is_available_npu() { return 0; }
-        export CUDA_VISIBLE_DEVICES=02,2,0,99 ASCEND_RT_VISIBLE_DEVICES=02,2,0,99
+        export CUDA_VISIBLE_DEVICES=02,2,0,99
         get_gpus 2 18 1 || exit 1
-        unset CUDA_VISIBLE_DEVICES ASCEND_RT_VISIBLE_DEVICES
+        unset CUDA_VISIBLE_DEVICES
         get_gpu 18 1 || exit 1
         is_available() { return 1; }
-        is_available_npu() { return 1; }
         sleep() { command sleep 1; }
         get_gpu 18 1
         """,
-        npu,
     )
     assert result.returncode != 0
     assert result.stdout.splitlines()[:2] == ["2,0", "0"]
     assert "Timeout" in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("npu", ["true", "false"])  # type: ignore[misc]
 @pytest.mark.parametrize("call", ["get_gpu 18", "get_gpus 2 18"])  # type: ignore[misc]
-def test_get_helpers_default_timeout_is_bounded(npu: str, call: str) -> None:
+def test_get_helpers_default_timeout_is_bounded(call: str) -> None:
     # Without an explicit timeout argument the helpers used to poll forever.
     # A fake clock now advances by the default (15s) each tick so a single
     # unavailable round-trip trips the timeout instead of hanging.
     result = run_shell(
         """
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=$1
         nvidia-smi() { echo 4; }
         is_available() { return 1; }
-        is_available_npu() { return 1; }
-        unset CUDA_VISIBLE_DEVICES ASCEND_RT_VISIBLE_DEVICES
+        unset CUDA_VISIBLE_DEVICES
         sleep() { :; }
         fake_now_file=$(mktemp)
         echo 0 > "$fake_now_file"
@@ -178,9 +159,8 @@ def test_get_helpers_default_timeout_is_bounded(npu: str, call: str) -> None:
             echo "$n"
             echo $((n + 15)) > "$fake_now_file"
         }
-        eval "$2"
+        eval "$1"
         """,
-        npu,
         call,
     )
     assert result.returncode != 0
@@ -202,9 +182,7 @@ def test_get_helpers_default_timeout_is_bounded(npu: str, call: str) -> None:
 def test_gpu_requires_usable_statistics(stats: str, status: str, available: bool) -> None:
     result = run_shell(
         """
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=false
         mock_stats=$1 rc=$2
         nvidia-smi() { echo "$mock_stats"; return "$rc"; }
         is_available 0 18
@@ -215,55 +193,15 @@ def test_gpu_requires_usable_statistics(stats: str, status: str, available: bool
     assert (result.returncode == 0) == available
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("capacity", "rate", "status", "available"),
-    [
-        ("64000", "0", "0", True),
-        ("64000", "50", "0", False),
-        ("64000", "0", "1", False),
-        ("", "0", "0", False),
-        ("0", "0", "0", False),
-        ("unknown", "0", "0", False),
-        ("64000", "", "0", False),
-        ("64000", "101", "0", False),
-    ],
-)
-def test_npu_usage_requires_valid_telemetry(
-    capacity: str, rate: str, status: str, available: bool
-) -> None:
-    result = run_shell(
-        """
-        npu-smi() { echo 'Total Count : 4'; }
-        source tools/devices/resource-npu.sh
-        cap=$1 rate=$2 rc=$3
-        npu-smi() {
-            printf 'HBM Capacity(MB) : %s\nHBM Usage Rate(%%) : %s\n' "$cap" "$rate"
-            return "$rc"
-        }
-        is_available_npu 1 16
-        """,
-        capacity,
-        rate,
-        status,
-    )
-    assert (result.returncode == 0) == available
-
-
-@pytest.mark.parametrize("npu", ["true", "false"])  # type: ignore[misc]
-def test_partial_multi_lock_rolls_back_under_errexit(npu: str) -> None:
+def test_partial_multi_lock_rolls_back_under_errexit() -> None:
     result = run_shell(
         """
         set -e
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=$1
         lock_gpu() { [[ $1 != 1 ]] || return 1; echo 123; }
-        lock_npu() { lock_gpu "$@"; }
         unlock_gpu() { echo "release $1" >&2; }
-        unlock_npu() { unlock_gpu "$@"; }
         lock_gpus 0,1
         """,
-        npu,
     )
     assert result.returncode != 0
     assert "release 123" in result.stderr
@@ -283,9 +221,7 @@ def test_mask_rejects_lock_before_allocation(mask: str, monkeypatch: pytest.Monk
 def test_lock_accepts_python3_without_python_alias() -> None:
     result = run_shell(
         """
-        npu-smi() { echo 'Total Count : 4'; }
         source tools/devices/resource.sh
-        npu_state=false
         command() {
             if [[ "$*" = "-v python" ]]; then return 1; fi
             builtin command "$@"

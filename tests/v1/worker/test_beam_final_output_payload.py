@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def bindings(batch_size: int) -> tuple["BeamRequestBinding", ...]:
-    # Mirror the scalar binding without importing a CUDA runner on NPU hosts.
+    # Mirror scalar binding without importing a CUDA runner on a host.
     return tuple(
         cast(
             "BeamRequestBinding",
